@@ -11,6 +11,7 @@ ALLOWED_SANDBOXES = {"read-only", "workspace-write"}
 ALLOWED_APPROVAL_POLICIES = {"untrusted", "on-request"}
 ALLOWED_DECISIONS = {"accept", "acceptForSession", "decline", "cancel"}
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+NOTIFICATION_STATUSES = {"sent", "failed", "no_target", "dry_run", "pending"}
 SMOKE_SENTINEL = "CODEX_ASYNC_OK"
 
 
@@ -54,6 +55,15 @@ def validate_start_input(prompt: str, cwd: str, sandbox: str, approval_policy: s
         raise ValidationError(f"cwd must be an existing directory: {cwd}")
     validate_sandbox(sandbox)
     validate_approval_policy(approval_policy)
+
+
+def validate_notify_target(target: str | None) -> str | None:
+    if target is None:
+        return None
+    normalized = target.strip()
+    if not normalized:
+        raise ValidationError("notify_target must be non-empty when provided.")
+    return normalized
 
 
 def validate_task_id(action: str, task_id: str | None) -> None:
@@ -123,8 +133,28 @@ def validate_bridge_output(action: str, data: Mapping[str, Any]) -> None:
     if action == "start":
         validate_start_output(data)
         return
+    if action == "notify_completed":
+        validate_notify_completed_output(data)
+        return
     if "success" in data and data.get("success") is not True:
         raise ValidationError(str(data.get("error") or f"{action} failed."))
+
+
+def validate_notify_completed_output(data: Mapping[str, Any]) -> None:
+    if data.get("success") is not True:
+        raise ValidationError("notify_completed output must have success=true.")
+    notifications = data.get("notifications")
+    if not isinstance(notifications, list):
+        raise ValidationError("notify_completed output must include notifications list.")
+    for item in notifications:
+        if not isinstance(item, Mapping):
+            raise ValidationError("notify_completed notifications must be objects.")
+        if not item.get("task_id"):
+            raise ValidationError("notify_completed notification missing task_id.")
+        status = item.get("notification_status")
+        if status not in NOTIFICATION_STATUSES:
+            allowed = ", ".join(sorted(NOTIFICATION_STATUSES))
+            raise ValidationError(f"notification_status must be one of: {allowed}.")
 
 
 def contains_text(value: Any, needle: str) -> bool:

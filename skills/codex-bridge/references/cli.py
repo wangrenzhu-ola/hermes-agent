@@ -30,6 +30,8 @@ try:
         validate_start_input,
         validate_status_input,
         validate_steer_input,
+        validate_notify_completed_output,
+        validate_notify_target,
     )
 except ImportError:
     from validator import (  # type: ignore
@@ -46,6 +48,8 @@ except ImportError:
         validate_start_input,
         validate_status_input,
         validate_steer_input,
+        validate_notify_completed_output,
+        validate_notify_target,
     )
 
 from tools.codex_bridge_tool import DEFAULT_APPROVAL_POLICY, DEFAULT_SANDBOX, codex_bridge
@@ -75,6 +79,7 @@ def _prompt_from_args(args: argparse.Namespace) -> str:
 def cmd_start(args: argparse.Namespace) -> dict[str, Any]:
     prompt = _prompt_from_args(args)
     validate_start_input(prompt, args.cwd, args.sandbox, args.approval_policy)
+    notify_target = validate_notify_target(args.notify_target)
     return call_bridge(
         "start",
         prompt=prompt,
@@ -83,6 +88,7 @@ def cmd_start(args: argparse.Namespace) -> dict[str, Any]:
         sandbox=args.sandbox,
         approval_policy=args.approval_policy,
         codex_home=args.codex_home,
+        notify_target=notify_target,
     )
 
 
@@ -93,6 +99,12 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_list(args: argparse.Namespace) -> dict[str, Any]:
     return call_bridge("list", limit=args.limit)
+
+
+def cmd_notify_completed(args: argparse.Namespace) -> dict[str, Any]:
+    data = call_bridge("notify_completed", limit=args.limit, dry_run=args.dry_run)
+    validate_notify_completed_output(data)
+    return data
 
 
 def cmd_steer(args: argparse.Namespace) -> dict[str, Any]:
@@ -126,6 +138,7 @@ def _smoke_prompt(wait_seconds: int) -> str:
 
 def cmd_smoke_test(args: argparse.Namespace) -> dict[str, Any]:
     validate_start_input(_smoke_prompt(args.wait), args.cwd, args.sandbox, args.approval_policy)
+    notify_target = validate_notify_target(args.notify_target)
     started = call_bridge(
         "start",
         prompt=_smoke_prompt(args.wait),
@@ -134,6 +147,7 @@ def cmd_smoke_test(args: argparse.Namespace) -> dict[str, Any]:
         sandbox=args.sandbox,
         approval_policy=args.approval_policy,
         codex_home=args.codex_home,
+        notify_target=notify_target,
     )
     task_id = started["task"]["hermes_task_id"]
     deadline = time.monotonic() + args.timeout
@@ -166,6 +180,11 @@ def add_common_start_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sandbox", default=DEFAULT_SANDBOX, type=validate_sandbox)
     parser.add_argument("--approval-policy", default=DEFAULT_APPROVAL_POLICY, type=validate_approval_policy)
     parser.add_argument("--codex-home", default=None, help="Optional CODEX_HOME override.")
+    parser.add_argument(
+        "--notify-target",
+        default=None,
+        help="Optional completion notification target, e.g. local or feishu:<chat_id>.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,6 +204,11 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list", help="List recent Codex Bridge tasks.")
     list_parser.add_argument("--limit", type=int, default=10)
     list_parser.set_defaults(func=cmd_list)
+
+    notify = subparsers.add_parser("notify-completed", help="One-shot poll and notify completed tasks.")
+    notify.add_argument("--limit", type=int, default=10)
+    notify.add_argument("--dry-run", action="store_true", help="Preview notifications without sending or marking.")
+    notify.set_defaults(func=cmd_notify_completed)
 
     steer = subparsers.add_parser("steer", help="Steer an active Codex turn.")
     steer.add_argument("task_id")

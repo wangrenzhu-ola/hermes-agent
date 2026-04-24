@@ -19,7 +19,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
@@ -29,6 +29,7 @@ CODEX_BRIDGE_DB = "codex_bridge.db"
 DEFAULT_APPROVAL_POLICY = "untrusted"
 DEFAULT_SANDBOX = "read-only"
 EVENT_TAIL_LIMIT = 20
+TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def check_codex_bridge_requirements() -> bool:
@@ -113,6 +114,10 @@ class CodexBridgeStore:
                     last_progress_summary TEXT,
                     final_summary TEXT,
                     error_summary TEXT,
+                    notify_target TEXT,
+                    notification_status TEXT,
+                    notified_at REAL,
+                    notification_error TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     completed_at REAL
@@ -143,6 +148,22 @@ class CodexBridgeStore:
                 );
                 """
             )
+            self._ensure_task_columns(conn)
+
+    def _ensure_task_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(codex_bridge_tasks)").fetchall()
+        }
+        migrations = {
+            "notify_target": "ALTER TABLE codex_bridge_tasks ADD COLUMN notify_target TEXT",
+            "notification_status": "ALTER TABLE codex_bridge_tasks ADD COLUMN notification_status TEXT",
+            "notified_at": "ALTER TABLE codex_bridge_tasks ADD COLUMN notified_at REAL",
+            "notification_error": "ALTER TABLE codex_bridge_tasks ADD COLUMN notification_error TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in existing:
+                conn.execute(statement)
 
     def upsert_task(self, task: "CodexBridgeTask") -> None:
         with self._lock, self._connect() as conn:
@@ -152,8 +173,9 @@ class CodexBridgeStore:
                     hermes_task_id, status, prompt_summary, codex_thread_id,
                     codex_turn_id, cwd, model, sandbox, approval_policy,
                     degraded_mode, last_progress_summary, final_summary,
-                    error_summary, created_at, updated_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    error_summary, notify_target, notification_status, notified_at,
+                    notification_error, created_at, updated_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(hermes_task_id) DO UPDATE SET
                     status=excluded.status,
                     codex_thread_id=excluded.codex_thread_id,
@@ -161,6 +183,10 @@ class CodexBridgeStore:
                     last_progress_summary=excluded.last_progress_summary,
                     final_summary=excluded.final_summary,
                     error_summary=excluded.error_summary,
+                    notify_target=excluded.notify_target,
+                    notification_status=excluded.notification_status,
+                    notified_at=excluded.notified_at,
+                    notification_error=excluded.notification_error,
                     updated_at=excluded.updated_at,
                     completed_at=excluded.completed_at
                 """,
@@ -178,6 +204,10 @@ class CodexBridgeStore:
                     task.last_progress_summary,
                     task.final_summary,
                     task.error_summary,
+                    task.notify_target,
+                    task.notification_status,
+                    task.notified_at,
+                    task.notification_error,
                     task.created_at,
                     task.updated_at,
                     task.completed_at,
@@ -299,13 +329,53 @@ class CodexBridgeStore:
                 """
                 SELECT hermes_task_id, status, prompt_summary, codex_thread_id,
                        codex_turn_id, last_progress_summary, final_summary,
-                       error_summary, created_at, updated_at, completed_at
+                       error_summary, notify_target, notification_status,
+                       notified_at, notification_error, created_at, updated_at,
+                       completed_at
                 FROM codex_bridge_tasks
                 ORDER BY updated_at DESC LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def list_completed_for_notification(self, limit: int = 10) -> List[Dict[str, Any]]:
+        placeholders = ",".join("?" for _ in TERMINAL_STATUSES)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM codex_bridge_tasks
+                WHERE status IN ({placeholders})
+                  AND (
+                    notification_status IS NULL
+                    OR notification_status='pending'
+                    OR notification_status='failed'
+                  )
+                ORDER BY completed_at ASC, updated_at ASC
+                LIMIT ?
+                """,
+                (*sorted(TERMINAL_STATUSES), limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_notification_status(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        notified_at: Optional[float] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE codex_bridge_tasks
+                SET notification_status=?, notified_at=?, notification_error=?, updated_at=?
+                WHERE hermes_task_id=?
+                """,
+                (status, notified_at, error, _now(), task_id),
+            )
 
 
 @dataclass
@@ -323,6 +393,10 @@ class CodexBridgeTask:
     last_progress_summary: Optional[str] = None
     final_summary: Optional[str] = None
     error_summary: Optional[str] = None
+    notify_target: Optional[str] = None
+    notification_status: Optional[str] = None
+    notified_at: Optional[float] = None
+    notification_error: Optional[str] = None
     created_at: float = field(default_factory=_now)
     updated_at: float = field(default_factory=_now)
     completed_at: Optional[float] = None
@@ -343,6 +417,10 @@ class CodexBridgeTask:
             "last_progress_summary": self.last_progress_summary,
             "final_summary": self.final_summary,
             "error_summary": self.error_summary,
+            "notify_target": self.notify_target,
+            "notification_status": self.notification_status,
+            "notified_at": self.notified_at,
+            "notification_error": self.notification_error,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "completed_at": self.completed_at,
@@ -489,6 +567,7 @@ class CodexBridgeManager:
         sandbox: str = DEFAULT_SANDBOX,
         approval_policy: str = DEFAULT_APPROVAL_POLICY,
         codex_home: Optional[str] = None,
+        notify_target: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not prompt or not prompt.strip():
             raise ValueError("codex_bridge start requires a non-empty prompt.")
@@ -505,6 +584,8 @@ class CodexBridgeManager:
             model=model,
             sandbox=sandbox,
             approval_policy=approval_policy,
+            notify_target=notify_target.strip() if notify_target and notify_target.strip() else None,
+            notification_status="pending" if notify_target and notify_target.strip() else None,
         )
         client = CodexJsonRpcClient(task_id, task, self)
         with self._lock:
@@ -579,6 +660,8 @@ class CodexBridgeManager:
             if stored:
                 snap["recent_events"] = stored.get("recent_events", [])
                 snap["pending_requests"] = stored.get("pending_requests", snap["pending_requests"])
+                for key in ("notification_status", "notified_at", "notification_error"):
+                    snap[key] = stored.get(key)
             return {"success": True, "task": snap}
         stored = self.store.get_task_snapshot(task_id)
         if stored:
@@ -588,6 +671,70 @@ class CodexBridgeManager:
 
     def list_tasks(self, limit: int = 10) -> Dict[str, Any]:
         return {"success": True, "tasks": self.store.list_tasks(limit=limit)}
+
+    def notify_completed(
+        self,
+        *,
+        limit: int = 10,
+        dry_run: bool = False,
+        notifier: Optional[Callable[[str, str], Any]] = None,
+    ) -> Dict[str, Any]:
+        notifier = notifier or _default_completion_notifier
+        candidates = self.store.list_completed_for_notification(limit=limit)
+        results: List[Dict[str, Any]] = []
+        for task in candidates:
+            task_id = str(task["hermes_task_id"])
+            target = str(task.get("notify_target") or "").strip()
+            message = _completion_notification_message(task)
+            if not target:
+                result = {
+                    "task_id": task_id,
+                    "status": task.get("status"),
+                    "notification_status": "no_target",
+                    "sent": False,
+                    "message": message,
+                }
+                if not dry_run:
+                    self.store.update_notification_status(task_id, "no_target")
+                results.append(result)
+                continue
+
+            result = {
+                "task_id": task_id,
+                "status": task.get("status"),
+                "target": target,
+                "notification_status": "dry_run" if dry_run else "pending",
+                "sent": False,
+                "message": message,
+            }
+            if dry_run:
+                results.append(result)
+                continue
+
+            try:
+                delivery = notifier(target, message)
+            except Exception as exc:
+                error = str(exc)
+                self.store.update_notification_status(task_id, "failed", error=error)
+                result["notification_status"] = "failed"
+                result["error"] = error
+                results.append(result)
+                continue
+
+            notified_at = _now()
+            self.store.update_notification_status(task_id, "sent", notified_at=notified_at)
+            result["notification_status"] = "sent"
+            result["sent"] = True
+            result["notified_at"] = notified_at
+            result["delivery"] = delivery
+            results.append(result)
+
+        return {
+            "success": True,
+            "dry_run": dry_run,
+            "processed": len(results),
+            "notifications": results,
+        }
 
     def steer(self, task_id: str, instruction: str) -> Dict[str, Any]:
         task, client = self._active(task_id)
@@ -726,6 +873,35 @@ def _get_manager() -> CodexBridgeManager:
         return _MANAGER
 
 
+def _completion_notification_message(task: Dict[str, Any]) -> str:
+    task_id = task.get("hermes_task_id") or "unknown"
+    status = task.get("status") or "unknown"
+    prompt = task.get("prompt_summary") or "(no prompt summary)"
+    summary = task.get("final_summary") or task.get("error_summary") or task.get("last_progress_summary") or ""
+    lines = [
+        f"Codex Bridge task {task_id} finished with status: {status}.",
+        f"Prompt: {prompt}",
+    ]
+    if summary:
+        lines.append(f"Summary: {_summarize_payload(summary, max_chars=700)}")
+    return "\n".join(lines)
+
+
+def _default_completion_notifier(target: str, message: str) -> Dict[str, Any]:
+    if target == "local":
+        return {"success": True, "target": target, "local": True}
+    from tools.send_message_tool import send_message_tool
+
+    raw = send_message_tool({"action": "send", "target": target, "message": message})
+    try:
+        result = json.loads(raw)
+    except Exception:
+        result = {"raw": raw}
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(str(result["error"]))
+    return result if isinstance(result, dict) else {"result": result}
+
+
 def codex_bridge(
     action: str,
     prompt: Optional[str] = None,
@@ -738,7 +914,9 @@ def codex_bridge(
     sandbox: str = DEFAULT_SANDBOX,
     approval_policy: str = DEFAULT_APPROVAL_POLICY,
     codex_home: Optional[str] = None,
+    notify_target: Optional[str] = None,
     limit: int = 10,
+    dry_run: bool = False,
 ) -> str:
     try:
         action = (action or "").strip().lower()
@@ -750,6 +928,7 @@ def codex_bridge(
                 sandbox=sandbox or DEFAULT_SANDBOX,
                 approval_policy=approval_policy or DEFAULT_APPROVAL_POLICY,
                 codex_home=codex_home,
+                notify_target=notify_target,
             )
         elif action == "status":
             if not task_id:
@@ -757,6 +936,8 @@ def codex_bridge(
             result = _get_manager().status(task_id)
         elif action == "list":
             result = _get_manager().list_tasks(limit=limit)
+        elif action == "notify_completed":
+            result = _get_manager().notify_completed(limit=limit, dry_run=dry_run)
         elif action == "steer":
             if not task_id or not instruction:
                 raise ValueError("codex_bridge steer requires task_id and instruction.")
@@ -770,7 +951,7 @@ def codex_bridge(
                 raise ValueError("codex_bridge respond requires task_id and instruction=request_id.")
             result = _get_manager().respond(task_id, instruction, decision=decision, answers=answers)
         else:
-            raise ValueError("action must be one of start, status, list, steer, interrupt, respond.")
+            raise ValueError("action must be one of start, status, list, notify_completed, steer, interrupt, respond.")
         return _json_dumps(result)
     except Exception as exc:
         return tool_error(str(exc))
@@ -782,14 +963,14 @@ CODEX_BRIDGE_SCHEMA = {
         "Start and control local Codex tasks through Codex app-server JSON-RPC. "
         "Uses stdio/WebSocket-capable app-server protocol semantics and never "
         "uses mailbox, inbox, or outbox files as the communication path. "
-        "Actions: start, status, list, steer, interrupt, respond."
+        "Actions: start, status, list, notify_completed, steer, interrupt, respond."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "status", "list", "steer", "interrupt", "cancel", "respond"],
+                "enum": ["start", "status", "list", "notify_completed", "steer", "interrupt", "cancel", "respond"],
                 "description": "Bridge operation to perform.",
             },
             "prompt": {"type": "string", "description": "Task prompt for action=start."},
@@ -823,7 +1004,18 @@ CODEX_BRIDGE_SCHEMA = {
                 "type": "string",
                 "description": "Optional CODEX_HOME override for testing or isolated runs.",
             },
+            "notify_target": {
+                "type": "string",
+                "description": (
+                    "Optional completion notification target for action=start, such as "
+                    "'local', 'feishu:<chat_id>', or any send_message target."
+                ),
+            },
             "limit": {"type": "integer", "description": "List limit for action=list."},
+            "dry_run": {
+                "type": "boolean",
+                "description": "For action=notify_completed, preview notifications without sending or marking tasks.",
+            },
         },
         "required": ["action"],
     },
@@ -846,7 +1038,9 @@ registry.register(
         sandbox=args.get("sandbox", DEFAULT_SANDBOX),
         approval_policy=args.get("approval_policy", DEFAULT_APPROVAL_POLICY),
         codex_home=args.get("codex_home"),
+        notify_target=args.get("notify_target"),
         limit=args.get("limit", 10),
+        dry_run=bool(args.get("dry_run", False)),
     ),
     check_fn=check_codex_bridge_requirements,
     emoji="C",

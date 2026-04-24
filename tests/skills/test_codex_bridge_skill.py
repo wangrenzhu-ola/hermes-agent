@@ -123,8 +123,38 @@ def test_cli_start_validates_and_emits_bridge_json(tmp_path, monkeypatch, capsys
             "sandbox": "read-only",
             "approval_policy": "untrusted",
             "codex_home": None,
+            "notify_target": None,
         }
     ]
+
+
+def test_cli_start_passes_notify_target(tmp_path, monkeypatch, capsys):
+    cli = load_reference_module("cli")
+    calls = []
+
+    def fake_codex_bridge(**kwargs):
+        calls.append(kwargs)
+        return json.dumps(
+            {
+                "success": True,
+                "protocol": {"mailbox": False, "transport": "app-server stdio"},
+                "task": {
+                    "hermes_task_id": "codex-abc",
+                    "codex_thread_id": "thread-abc",
+                    "codex_turn_id": "turn-abc",
+                    "notify_target": kwargs["notify_target"],
+                },
+            }
+        )
+
+    monkeypatch.setattr(cli, "codex_bridge", fake_codex_bridge)
+
+    exit_code = cli.main(["start", "--cwd", str(tmp_path), "--notify-target", "local", "--prompt", "Analyze tests"])
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["task"]["notify_target"] == "local"
+    assert calls[0]["notify_target"] == "local"
 
 
 def test_cli_respond_maps_request_id_to_bridge_instruction(monkeypatch, capsys):
@@ -218,3 +248,37 @@ def test_cli_smoke_test_polls_until_completed_with_sentinel(tmp_path, monkeypatc
     assert output["task_id"] == "codex-smoke"
     assert [call["action"] for call in calls] == ["start", "status"]
     assert "CODEX_ASYNC_OK" in calls[0]["prompt"]
+    assert calls[0]["notify_target"] is None
+
+
+def test_cli_notify_completed_dry_run_uses_bridge_without_real_notifier(monkeypatch, capsys):
+    cli = load_reference_module("cli")
+    calls = []
+
+    def fake_codex_bridge(**kwargs):
+        calls.append(kwargs)
+        return json.dumps(
+            {
+                "success": True,
+                "dry_run": True,
+                "processed": 1,
+                "notifications": [
+                    {
+                        "task_id": "codex-abc",
+                        "target": "local",
+                        "notification_status": "dry_run",
+                        "sent": False,
+                        "message": "preview",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(cli, "codex_bridge", fake_codex_bridge)
+
+    exit_code = cli.main(["notify-completed", "--limit", "5", "--dry-run"])
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["notifications"][0]["notification_status"] == "dry_run"
+    assert calls == [{"action": "notify_completed", "limit": 5, "dry_run": True}]
