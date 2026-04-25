@@ -1,0 +1,47 @@
+{
+  "child_result": {
+    "approval_policy": "on-request",
+    "artifacts": [
+      {
+        "kind": "child_result",
+        "path": "docs/ledgers/artifacts/DEM-013/fake-DEM-013-document_review_smoke-1777125642305.json",
+        "status": "created"
+      }
+    ],
+    "child_id": "fake-DEM-013-document_review_smoke-1777125642305",
+    "effort": "low",
+    "ended_at": "2026-04-25T14:00:42Z",
+    "model": "fake-executor",
+    "next_recommendation": {
+      "action": "observe_ledger",
+      "reason": "P0 child smoke completed; PMO recorded the result in the ledger."
+    },
+    "phase": "document_review",
+    "result": "pass",
+    "risks": [],
+    "sandbox": "read-only",
+    "started_at": "2026-04-25T14:00:42Z",
+    "status": "done",
+    "summary": "Fake child completed document_review_smoke for DEM-013.",
+    "validation": [
+      {
+        "checked_at": "2026-04-25T14:00:42Z",
+        "method": "fake",
+        "name": "fake_child_contract",
+        "status": "pass"
+      }
+    ]
+  },
+  "executor": "fake",
+  "ledger_task_id": "DEM-013",
+  "task": {
+    "allowed_child_kind": "document_review_smoke",
+    "next_action": "start_p0_child_dispatch_mvp",
+    "phase": "document_review",
+    "sandbox": "read-only",
+    "started_at": "2026-04-25T14:00:42Z",
+    "status": "running",
+    "task_id": "DEM-013",
+    "title": "Codex PMO Ledger Runner"
+  }
+}

@@ -1,0 +1,418 @@
+schema_version: 1
+runner_version: planned-0.1.0
+task_id: DEM-013
+title: Codex PMO Ledger Runner
+created_at: '2026-04-25T00:00:00Z'
+updated_at: '2026-04-25T14:54:38Z'
+phase: compound
+status: done
+repo:
+  root: .
+  current_branch: codex/pmo-ledger-runner
+  base_branch: main
+  task_branch: codex/pmo-ledger-runner
+  worktree: .
+  repo_lock_key: hermes-agent
+  repo_write_slot: null
+storage:
+  mode: hybrid_docs_examples_runtime_state
+  runtime_path: ~/.hermes/pmo/ledgers/DEM-013.yaml
+  docs_snapshot_path: docs/ledgers/codex-pmo-ledger-runner-ledger.yaml
+  active_source: docs_snapshot
+
+workflow_source: galeharness-compound-workflow
+policy:
+  child_depth_limit: 1
+  default_sandbox: read-only
+  work_sandbox: workspace-write
+  approval_policy: on-request
+  work_requires_document_review_pass: true
+  danger_full_access_allowed: false
+  approval_policy_never_allowed: false
+  mailbox_as_primary_transport: false
+  user_decisions_pause_runner: true
+scheduler:
+  status: planned
+  concurrency_limit: 1
+  read_only_child_limit: 1
+  work_child_limit_per_repo: 0
+  scan_statuses:
+  - queued
+  p0_supported_task_kinds:
+  - document_review_smoke
+  - ledger_validation_smoke
+  notes: 'P0 must scan queued tasks and start no more than the configured read-only
+    child limit. Work/write children remain disabled until P2.
+
+    '
+tasks:
+- task_id: DEM-013
+  title: Codex PMO Ledger Runner
+  phase: document_review
+  status: done
+  next_action: done_ready_for_pr
+  allowed_child_kind: document_review_smoke
+  sandbox: read-only
+  started_at: '2026-04-25T14:00:42Z'
+  ended_at: '2026-04-25T14:00:42Z'
+phases:
+  brainstorm_plan:
+    status: done
+    started_at: '2026-04-25T00:00:00Z'
+    ended_at: '2026-04-25T00:00:00Z'
+    result: artifacts_created
+    artifacts:
+    - docs/brainstorms/2026-04-25-codex-pmo-ledger-runner-requirements.md
+    - docs/plans/2026-04-25-codex-pmo-ledger-runner-plan.md
+    - docs/ledgers/codex-pmo-ledger-runner-ledger.yaml
+  document_review:
+    status: done
+    started_at: '2026-04-25T13:41:44Z'
+    ended_at: '2026-04-25T13:41:44Z'
+    result: pass
+    review_mode: headless
+    summary: 'Requirements, plan, and ledger were reviewed. P0/P1 blockers were patched
+      directly: runtime ledger storage, strict document-review gate, P0 scope, child
+      result contract, ledger/status locking, and Bridge boundary decisions.
+
+      '
+    artifacts: []
+  work:
+    status: queued
+    blocked_by: []
+    artifacts: []
+  review:
+    status: queued
+    artifacts: []
+  compound:
+    status: prepared
+    artifacts: []
+children:
+- child_id: fake-DEM-013-document_review_smoke-1777125642305
+  phase: document_review
+  status: done
+  result: pass
+  model: fake-executor
+  effort: low
+  sandbox: read-only
+  approval_policy: on-request
+  started_at: '2026-04-25T14:00:42Z'
+  ended_at: '2026-04-25T14:00:42Z'
+  artifacts:
+  - path: docs/ledgers/artifacts/DEM-013/fake-DEM-013-document_review_smoke-1777125642305.json
+    kind: child_result
+    status: created
+  summary: Fake child completed document_review_smoke for DEM-013.
+  validation:
+  - name: fake_child_contract
+    status: pass
+    method: fake
+    checked_at: '2026-04-25T14:00:42Z'
+  risks: []
+  next_recommendation:
+    action: observe_ledger
+    reason: P0 child smoke completed; PMO recorded the result in the ledger.
+pmo_activity:
+- activity_id: phase-1-authoring
+  phase: brainstorm_plan
+  status: done
+  actor: codex
+  model: codex
+  effort: medium
+  started_at: '2026-04-25T00:00:00Z'
+  ended_at: '2026-04-25T00:00:00Z'
+  elapsed_seconds: null
+  token_usage:
+    prompt_tokens: null
+    completion_tokens: null
+    total_tokens: null
+  artifacts:
+  - path: docs/brainstorms/2026-04-25-codex-pmo-ledger-runner-requirements.md
+    kind: requirements
+  - path: docs/plans/2026-04-25-codex-pmo-ledger-runner-plan.md
+    kind: plan
+  - path: docs/ledgers/codex-pmo-ledger-runner-ledger.yaml
+    kind: ledger
+  summary: 'Phase 1 completed manually in the current Codex session: requirements,
+    implementation plan, and initial ledger draft were created before the DEC-004
+    scope correction. No code, commit, push, or PR was performed.
+
+    '
+  next_recommendation:
+    action: run_document_review
+    reason: Validate requirements, plan slicing, ledger schema, and safety gates before
+      any work phase.
+artifacts:
+- path: docs/brainstorms/2026-04-25-codex-pmo-ledger-runner-requirements.md
+  kind: requirements
+  status: created
+- path: docs/plans/2026-04-25-codex-pmo-ledger-runner-plan.md
+  kind: plan
+  status: created
+- path: docs/ledgers/codex-pmo-ledger-runner-ledger.yaml
+  kind: ledger
+  status: created
+- path: docs/ledgers/artifacts/DEM-013/fake-DEM-013-document_review_smoke-1777125642305.json
+  kind: child_result
+  status: created
+validation:
+- name: phase_1_artifacts_exist
+  status: pass
+  method: filesystem_check
+  checked_at: '2026-04-25T13:36:00Z'
+- name: ledger_yaml_parse
+  status: pass
+  method: ruby_yaml_load_file
+  checked_at: '2026-04-25T13:41:44Z'
+- name: plan_requires_document_review_before_work
+  status: pass
+  method: document_review_gate_defined
+  checked_at: '2026-04-25T00:00:00Z'
+- name: no_implementation_commits
+  status: pass
+  method: git_status_review
+  checked_at: '2026-04-25T13:36:00Z'
+- name: document_review_result
+  status: pass
+  method: headless_document_review
+  checked_at: '2026-04-25T13:41:44Z'
+  details: requirements_plan_and_ledger_patched
+- name: p0_scope_independent
+  status: pass
+  method: plan_review
+  checked_at: '2026-04-25T13:44:33Z'
+  details: P0 is skill CLI plus ledger/status/list/validate, child executor abstraction,
+    scheduler, and one read-only child dispatch smoke; no slash command, tool registration,
+    work writes, commit, push, or PR.
+- name: p0_child_dispatch_required
+  status: pass
+  method: scope_correction_review
+  checked_at: '2026-04-25T13:44:33Z'
+  details: Scope corrected so MVP proves PMO can start and track at least one child
+    Codex from day one.
+- name: status_contract_defined
+  status: pass
+  method: schema_review
+  checked_at: '2026-04-25T13:41:44Z'
+- name: ledger_locking_specified
+  status: pass
+  method: schema_review
+  checked_at: '2026-04-25T13:41:44Z'
+- name: fake_child_contract
+  status: pass
+  method: fake
+  checked_at: '2026-04-25T14:00:42Z'
+- name: p0_reference_cli_py_compile
+  status: pass
+  method: python_m_py_compile
+  checked_at: '2026-04-25T14:02:53Z'
+  details: cli.py, validator.py, ledger.py, child_executor.py, and scheduler.py compile.
+- name: p0_contract_tests
+  status: pass
+  method: python_m_pytest
+  checked_at: '2026-04-25T14:02:53Z'
+  details: tests/skills/test_codex_pmo_ledger_runner_contract.py passed 6 tests; scripts/run_tests.sh could not run because this worktree has no .venv, venv, or $HOME/.hermes/hermes-agent/venv.
+- name: p0_cli_smoke
+  status: pass
+  method: cli_smoke_fake_executor
+  checked_at: '2026-04-25T14:02:53Z'
+  details: init -> status -> run-once --executor fake -> validate -> list succeeded against a temporary HERMES_HOME.
+- name: p0_diff_check
+  status: pass
+  method: git_diff_check
+  checked_at: '2026-04-25T14:02:53Z'
+risks:
+- id: RISK-001
+  severity: high
+  description: Runner could become too broad if P0 child dispatch expands into work
+    automation.
+  mitigation: Keep P0 to read-only child dispatch smoke, child result contract, scheduler
+    limit, and ledger/status/list/validate; defer work/write automation to P2.
+  owner: codex_pmo
+  status: mitigated
+- id: RISK-002
+  severity: high
+  description: Automatic phase advancement could bypass user decisions.
+  mitigation: Implement needs-user transition guard and test it before work automation.
+  owner: codex_pmo
+  status: open
+- id: RISK-003
+  severity: medium
+  description: Existing Codex Bridge responsibilities may blur with PMO Runner responsibilities.
+  mitigation: Keep Bridge as transport/task control and Runner as compound phase ledger.
+  owner: codex_pmo
+  status: mitigated
+decisions_needed:
+- id: DEC-001
+  status: decided
+  question: Should P0 expose only a skill CLI first, or also a Hermes slash command?
+  options:
+  - skill_cli_only
+  - skill_cli_plus_slash_command
+  recommendation: skill_cli_only
+  choice: skill_cli_only
+  decided_by: codex_pmo_ai_infra
+  decided_at: '2026-04-25T13:41:44Z'
+  rationale: P0 must be independently shippable without touching slash command, gateway,
+    or TUI surfaces.
+  blocks_phase: p0_scope_lock
+- id: DEC-002
+  status: decided
+  question: Should ledger files live under docs/ledgers/ permanently, or under a profile-scoped
+    Hermes state directory with docs examples only?
+  options:
+  - docs_ledgers_for_dem_and_human_review
+  - hermes_home_state_for_runtime_ledgers
+  - hybrid_docs_examples_runtime_state
+  recommendation: hybrid_docs_examples_runtime_state
+  choice: hybrid_docs_examples_runtime_state
+  decided_by: codex_pmo_ai_infra
+  decided_at: '2026-04-25T13:41:44Z'
+  rationale: Runtime state must be profile-safe; docs ledgers remain useful for examples
+    and review snapshots.
+  blocks_phase: p0_schema_finalization
+- id: DEC-003
+  status: decided
+  question: Which supervised child execution path should P0 use first?
+  options:
+  - codex_bridge_app_server
+  - exec_json_runner
+  - abstraction_with_codex_bridge_default
+  recommendation: abstraction_with_codex_bridge_default
+  choice: abstraction_with_codex_bridge_default
+  decided_by: codex_pmo_ai_infra
+  decided_at: '2026-04-25T13:41:44Z'
+  rationale: PMO should depend on a stable child executor interface while Codex Bridge
+    remains the default transport.
+  blocks_phase: p0_dispatch_design
+- id: DEC-004
+  status: decided
+  question: Should P0 be ledger-only or require PMO to dispatch a child Codex from
+    day one?
+  options:
+  - ledger_only
+  - child_dispatch_from_day_one
+  recommendation: child_dispatch_from_day_one
+  choice: child_dispatch_from_day_one
+  decided_by: user
+  decided_at: '2026-04-25T13:44:33Z'
+  rationale: Hermes and the user must only observe the ledger; PMO must manage child
+    Codex work so multiple demands can proceed without supervisor context explosion.
+  blocks_phase: p0_scope_lock
+next_action:
+  action: observe_ledger
+  reason: P0 child smoke completed; PMO recorded the result in the ledger.
+locks:
+  ledger:
+    status: unlocked
+    owner: null
+    acquired_at: null
+    heartbeat_at: null
+    lease_ttl_seconds: 300
+    stale_recovery: mark_stale_then_needs_user_or_controlled_reclaim
+  repo:
+    status: not_requested
+    key: hermes-agent
+    owner: null
+    acquired_at: null
+    heartbeat_at: null
+    lease_ttl_seconds: 900
+    stale_recovery: mark_stale_then_needs_user_or_controlled_reclaim
+status_contract:
+  version: 1
+  required_fields:
+  - task_id
+  - title
+  - phase
+  - status
+  - result
+  - next_action
+  - blocking_decisions
+  - high_risks
+  - recent_children
+  - artifacts
+  - validation_summary
+  - budget_summary
+  - locks
+  - audit_tail
+  filters:
+    blocking_decisions: decisions_needed where status=open and blocks current or next
+      phase
+    high_risks: risks where severity=high and status not in [closed, mitigated]
+budget:
+  pmo_model: codex
+  pmo_effort: medium
+  children_started: 1
+  max_child_depth: 1
+  elapsed_seconds: null
+  token_usage:
+    prompt_tokens: null
+    completion_tokens: null
+    total_tokens: null
+  budget_warnings: []
+audit:
+- at: '2026-04-25T00:00:00Z'
+  actor: user
+  event: requested_phase_1_brainstorm_plan
+  details: Create requirements, implementation plan, and initial ledger only.
+- at: '2026-04-25T00:00:00Z'
+  actor: codex
+  event: created_phase_1_artifacts
+  details: Requirements, plan, and ledger draft added; no implementation performed.
+- at: '2026-04-25T13:41:44Z'
+  actor: codex
+  event: document_review_passed
+  details: 'Headless document-review patched requirements, plan, and ledger. This
+    result was later scope-corrected by DEC-004.
+
+    '
+- at: '2026-04-25T13:44:33Z'
+  actor: user
+  event: scope_correction_p0_child_dispatch_required
+  details: 'P0 must include PMO-controlled child Codex dispatch from day one. Hermes
+    and the user observe ledger; PMO scans queued tasks, starts child Codex under
+    concurrency limits, records child status/artifacts/summary/ validation/risks,
+    and does not enter work writes until P2.
+
+    '
+- at: '2026-04-25T14:00:42Z'
+  actor: codex_pmo
+  event: child_dispatch_started
+  details: DEM-013:DEM-013 via executor fake.
+- at: '2026-04-25T14:00:42Z'
+  actor: codex_pmo
+  event: child_dispatch_completed
+  details: 'DEM-013:DEM-013: fake-DEM-013-document_review_smoke-1777125642305'
+- at: '2026-04-25T14:02:53Z'
+  actor: codex
+  event: p0_implementation_verified
+  details: Added PMO Ledger Runner skill CLI, validator, ledger storage, child executor abstraction, scheduler, contract tests, docs ledger child smoke artifact, and implementation note. No commit, push, or PR performed.
+future_schema_example:
+  child_result_required_fields:
+  - child_id
+  - phase
+  - status
+  - result
+  - model
+  - effort
+  - sandbox
+  - approval_policy
+  - started_at
+  - ended_at
+  - artifacts
+  - summary
+  - validation
+  - risks
+  - next_recommendation
+  terminal_statuses:
+  - done
+  - failed
+  - blocked
+  - needs-user
+  allowed_phases:
+  - brainstorm_plan
+  - document_review
+  - work
+  - review
+  - compound
+  - done
