@@ -589,6 +589,212 @@ def _resolve_runtime_agent_kwargs() -> dict:
     }
 
 
+
+def _gateway_routing_config() -> dict:
+    """Return the gateway routing config loaded at module import time."""
+    cfg = globals().get("_cfg")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _as_list(value: Any) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _source_value(source: Optional[SessionSource], attr: str) -> str:
+    if source is None:
+        return ""
+    value = getattr(source, attr, None)
+    if value is None:
+        return ""
+    try:
+        return value.value
+    except AttributeError:
+        return str(value)
+
+
+def _routing_rule_matches(rule: dict, *, source: Optional[SessionSource], provider: str) -> bool:
+    """Return True when a gateway routing rule applies to this source/provider."""
+    if not isinstance(rule, dict):
+        return False
+    rule_provider = str(rule.get("provider") or "").strip().lower()
+    if rule_provider and rule_provider != (provider or "").strip().lower():
+        return False
+
+    checks = [
+        ("platform", "platforms", _source_value(source, "platform")),
+        ("chat_id", "chat_ids", _source_value(source, "chat_id")),
+        ("thread_id", "thread_ids", _source_value(source, "thread_id")),
+        ("chat_name", "chat_names", _source_value(source, "chat_name")),
+        ("chat_type", "chat_types", _source_value(source, "chat_type")),
+    ]
+    for singular, plural, actual in checks:
+        expected = _as_list(rule.get(singular)) + _as_list(rule.get(plural))
+        if expected and actual not in {str(item) for item in expected}:
+            return False
+    return True
+
+
+def _apply_gateway_credential_routing(runtime_kwargs: dict, *, source: Optional[SessionSource]) -> dict:
+    """Filter credential pools for platform/chat-specific gateway routes.
+
+    The first matching rule wins so allowlisted Feishu routes can be placed
+    before a broad default Feishu deny rule.
+    """
+    provider = str(runtime_kwargs.get("provider") or "").strip()
+    rules = ((_gateway_routing_config().get("gateway_credential_routing") or {}).get("rules") or [])
+    if not provider or not rules:
+        return runtime_kwargs
+
+    matched = None
+    for rule in rules:
+        if _routing_rule_matches(rule, source=source, provider=provider):
+            matched = rule
+            break
+    if not matched:
+        return runtime_kwargs
+
+    pool = runtime_kwargs.get("credential_pool")
+    if pool is None:
+        try:
+            from agent.credential_pool import load_pool
+            pool = load_pool(provider)
+        except Exception as exc:
+            logger.warning("Gateway credential route matched but pool load failed for %s: %s", provider, exc)
+            return runtime_kwargs
+
+    try:
+        entries = list(pool.entries())
+    except Exception:
+        return runtime_kwargs
+
+    allow = {str(x) for x in (_as_list(matched.get("allow_labels")) + _as_list(matched.get("only_labels")))}
+    deny = {str(x) for x in (_as_list(matched.get("deny_labels")) + _as_list(matched.get("exclude_labels")))}
+    prefer = {str(x) for x in _as_list(matched.get("prefer_labels"))}
+
+    filtered = entries
+    if allow:
+        filtered = [entry for entry in filtered if getattr(entry, "label", "") in allow]
+    if deny:
+        filtered = [entry for entry in filtered if getattr(entry, "label", "") not in deny]
+    if prefer and matched.get("exclusive"):
+        filtered = [entry for entry in filtered if getattr(entry, "label", "") in prefer]
+    if prefer and filtered:
+        filtered = sorted(filtered, key=lambda entry: (0 if getattr(entry, "label", "") in prefer else 1, getattr(entry, "priority", 999)))
+
+    if not filtered:
+        logger.error(
+            "Gateway credential route matched but left no credentials: platform=%s chat_id=%s provider=%s rule=%s",
+            _source_value(source, "platform"),
+            _source_value(source, "chat_id"),
+            provider,
+            {k: v for k, v in matched.items() if k not in {"api_key", "access_token", "refresh_token"}},
+        )
+        return runtime_kwargs
+
+    from agent.credential_pool import CredentialPool
+    routed = dict(runtime_kwargs)
+    routed["credential_pool"] = CredentialPool(provider, filtered)
+    logger.info(
+        "Gateway credential route applied: platform=%s chat_id=%s provider=%s labels=%s",
+        _source_value(source, "platform"),
+        _source_value(source, "chat_id"),
+        provider,
+        [getattr(entry, "label", "") for entry in filtered],
+    )
+    return routed
+
+
+_LTM_REVIEW_PHRASES = (
+    "长期记忆整理",
+    "整理长期记忆",
+    "长期 memory 整理",
+    "long-term memory review",
+    "long term memory review",
+)
+
+
+def _is_long_term_memory_review_request(text: str) -> bool:
+    """Return True for manual read-only LTM review requests."""
+    normalized = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not normalized:
+        return False
+    if not any(phrase.lower() in normalized for phrase in _LTM_REVIEW_PHRASES):
+        return False
+    review_markers = ("报告", "review", "只读", "执行", "跑", "整理", "生成")
+    if not any(marker in normalized for marker in review_markers):
+        return False
+    mutation_markers = (
+        "写入", "落库", "应用变更", "应用修改", "直接改", "直接写",
+        "确认项写入", "按建议写入", "apply changes", "write memory",
+    )
+    if any(marker in normalized for marker in mutation_markers):
+        return False
+    return True
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _run_long_term_memory_review_adapter(*, run_id: str | None = None) -> dict:
+    """Run the active infra-sleep-skill LTM adapter and return parsed stdout."""
+    import subprocess
+
+    active_skill = _hermes_home / "skills" / "infra-sleep-skill"
+    script = active_skill / "references" / "long_term_memory_review.py"
+    if not script.exists():
+        raise FileNotFoundError(f"LTM adapter not found: {script}")
+
+    memory_path = _hermes_home / "memories" / "MEMORY.md"
+    user_path = _hermes_home / "memories" / "USER.md"
+    before_memory_sha = _sha256_file(memory_path) if memory_path.exists() else "missing"
+    before_user_sha = _sha256_file(user_path) if user_path.exists() else "missing"
+
+    run_id = run_id or datetime.now().strftime("weixin-ltm-%Y%m%d-%H%M%S")
+    output_dir = _hermes_home / "sleep-reports" / run_id
+    cmd = [
+        sys.executable,
+        str(script),
+        "--memory-path",
+        str(memory_path),
+        "--user-profile-path",
+        str(user_path),
+        "--skills-root",
+        str(_hermes_home / "skills"),
+        "--output-dir",
+        str(output_dir),
+        "--run-id",
+        run_id,
+        "--pretty",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"LTM adapter exited {result.returncode}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"LTM adapter returned non-JSON stdout: {exc}") from exc
+    after_memory_sha = _sha256_file(memory_path) if memory_path.exists() else "missing"
+    after_user_sha = _sha256_file(user_path) if user_path.exists() else "missing"
+    payload["adapter_cmd"] = " ".join(shlex.quote(part) for part in cmd)
+    payload["memory_sha_before"] = before_memory_sha
+    payload["memory_sha_after"] = after_memory_sha
+    payload["user_sha_before"] = before_user_sha
+    payload["user_sha_after"] = after_user_sha
+    payload["memory_sha_unchanged"] = before_memory_sha == after_memory_sha
+    payload["user_sha_unchanged"] = before_user_sha == after_user_sha
+    return payload
+
 def _try_resolve_fallback_provider() -> dict | None:
     """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -1462,6 +1668,7 @@ class GatewayRunner:
             )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
+        runtime_kwargs = _apply_gateway_credential_routing(runtime_kwargs, source=source)
         if override and resolved_session_key:
             model, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
@@ -4542,6 +4749,41 @@ class GatewayRunner:
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
+
+        # High-priority manual long-term-memory review route.  This must run
+        # before normal agent dispatch so Weixin/Feishu requests cannot fall
+        # through to the generic memory writer and mutate MEMORY.md/USER.md.
+        if (
+            not is_internal
+            and source.platform in (Platform.WEIXIN, Platform.FEISHU)
+            and _is_long_term_memory_review_request(event.text or "")
+        ):
+            logger.info(
+                "Routing manual long-term memory review request through adapter: platform=%s chat_id=%s",
+                source.platform.value if source.platform else "unknown",
+                source.chat_id or "unknown",
+            )
+            try:
+                run_id = f"{source.platform.value}-ltm-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                payload = await asyncio.to_thread(_run_long_term_memory_review_adapter, run_id=run_id)
+            except Exception as exc:
+                logger.exception("Long-term memory review adapter failed")
+                return f"长期记忆整理执行失败：`{exc}`"
+            message = str(payload.get("user_message") or "").strip()
+            if not message:
+                message = (
+                    "Hermes 长期记忆整理完毕。\n\n"
+                    f"- 状态：`{payload.get('status')}`\n"
+                    f"- Markdown：`{payload.get('markdown_path')}`\n"
+                    f"- JSON：`{payload.get('report_path')}`\n"
+                    f"- Operation log：`{payload.get('operation_log_path')}`"
+                )
+            sha_line = (
+                "\n\nSHA 校验："
+                f" MEMORY.md unchanged=`{payload.get('memory_sha_unchanged')}`;"
+                f" USER.md unchanged=`{payload.get('user_sha_unchanged')}`"
+            )
+            return message + sha_line
         
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
