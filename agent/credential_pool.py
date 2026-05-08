@@ -85,7 +85,7 @@ CUSTOM_POOL_PREFIX = "custom:"
 _EXTRA_KEYS = frozenset({
     "token_type", "scope", "client_id", "portal_base_url", "obtained_at",
     "expires_in", "agent_key_id", "agent_key_expires_in", "agent_key_reused",
-    "agent_key_obtained_at", "tls",
+    "agent_key_obtained_at", "tls", "capability_manifest",
 })
 
 
@@ -949,6 +949,57 @@ class CredentialPool:
             return current
         available = self._available_entries()
         return available[0] if available else None
+
+    def select_with_capabilities(
+        self,
+        request: "RouteRequest",
+        *,
+        allow_downgrade: bool = False,
+    ) -> Tuple[Optional["PooledCredential"], "RoutingDecision"]:
+        """Capability-aware credential selection.
+
+        Like select(), but filters candidates through the capability router
+        to enforce entitlement isolation, capability parity, and feature
+        requirements. Returns both the selected credential (or None) and
+        a RoutingDecision with a redacted audit trace.
+
+        Backward compatible: credentials without capability_manifest in their
+        extra dict get a permissive default manifest and pass all checks.
+        """
+        from agent.capability_router import (
+            RoutingDecision,
+            RoutingVerdict,
+            route_with_capabilities,
+        )
+
+        with self._lock:
+            available = self._available_entries(clear_expired=True, refresh=True)
+            if not available:
+                decision = RoutingDecision(
+                    verdict=RoutingVerdict.blocked,
+                    reasons=["no available credentials (all exhausted or empty)"],
+                )
+                return None, decision
+
+            decision = route_with_capabilities(
+                available, request, allow_downgrade=allow_downgrade,
+            )
+
+            if decision.verdict == RoutingVerdict.selected and decision.credential_id:
+                self._current_id = decision.credential_id
+                entry = self.current()
+                if entry:
+                    logger.info(
+                        "credential pool: capability-routed to %s (parity=%s)",
+                        decision.credential_label, decision.parity_satisfied,
+                    )
+                return entry, decision
+
+            logger.info(
+                "credential pool: capability routing %s — %s",
+                decision.verdict.value, "; ".join(decision.reasons),
+            )
+            return None, decision
 
     def mark_exhausted_and_rotate(
         self,
