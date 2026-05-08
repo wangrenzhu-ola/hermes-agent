@@ -342,20 +342,23 @@ def _check_entry_eligibility(
                        f"request from '{request.channel or request.platform}' denied",
             )
 
-    # If request has specific entitlement, credential must allow it
+    # If request has a specific entitlement, credential must explicitly allow it.
+    # A credential with no entitlement metadata is backward-compatible only for
+    # generic requests; it must not satisfy protected entitlement requests.
     if request.entitlement:
-        if manifest.exclusive_entitlements and request.entitlement not in manifest.exclusive_entitlements:
+        allowed_entitlements = manifest.exclusive_entitlements | manifest.channel_entitlements
+        if request.entitlement not in allowed_entitlements:
+            if manifest.exclusive_entitlements:
+                detail = (f"request requires '{request.entitlement}' but credential "
+                          f"is exclusive to {sorted(manifest.exclusive_entitlements)}")
+            elif manifest.channel_entitlements:
+                detail = f"request requires '{request.entitlement}' not in credential entitlements"
+            else:
+                detail = f"request requires protected entitlement '{request.entitlement}' but credential declares none"
             return SkippedCandidate(
                 credential_label=label,
                 reason=RoutingFailureReason.entitlement_denied,
-                detail=f"request requires '{request.entitlement}' but credential "
-                       f"is exclusive to {sorted(manifest.exclusive_entitlements)}",
-            )
-        if manifest.channel_entitlements and request.entitlement not in manifest.channel_entitlements:
-            return SkippedCandidate(
-                credential_label=label,
-                reason=RoutingFailureReason.entitlement_denied,
-                detail=f"request requires '{request.entitlement}' not in credential entitlements",
+                detail=detail,
             )
 
     # --- Provider match ---
@@ -418,13 +421,13 @@ def _check_entry_eligibility(
         )
 
     # --- Parity class ---
-    if request.required_parity_class and manifest.parity_class:
+    if request.required_parity_class:
         if manifest.parity_class != request.required_parity_class:
             return SkippedCandidate(
                 credential_label=label,
                 reason=RoutingFailureReason.parity_mismatch,
                 detail=f"need parity class '{request.required_parity_class}', "
-                       f"have '{manifest.parity_class}'",
+                       f"have '{manifest.parity_class or 'undeclared'}'",
             )
 
     return None  # Entry is eligible

@@ -153,6 +153,7 @@ class TestWeixinProIsolation:
     def _standard_credential(self):
         return _make_credential("std-1", "standard-cred", {
             "provider": "anthropic",
+            "channel_entitlements": ["weixin", "feishu", "telegram"],
             "parity_class": "claude-standard",
             "context_cap": 200000,
         })
@@ -213,9 +214,14 @@ class TestWeixinProIsolation:
         assert decision.parity_satisfied is False
 
     def test_weixin_pro_downgrade_requires_explicit_verdict(self):
-        """With allow_downgrade=True, a non-parity credential returns downgrade verdict
-        rather than silently selecting."""
-        entries = [self._standard_credential()]
+        """With allow_downgrade=True, an entitled but non-parity credential
+        returns downgrade verdict rather than silently selecting."""
+        cred = _make_credential("weak-pro", "weak-pro-cred", {
+            "provider": "anthropic",
+            "channel_entitlements": ["weixin-pro-exclusive"],
+            "parity_class": "claude-standard",
+        })
+        entries = [cred]
         request = RouteRequest(
             platform="weixin",
             channel="weixin-pro-exclusive",
@@ -227,6 +233,19 @@ class TestWeixinProIsolation:
         assert decision.verdict == RoutingVerdict.downgrade
         assert decision.parity_satisfied is False
         assert decision.downgrade_details is not None
+
+    def test_weixin_pro_request_blocks_legacy_credential_without_entitlement(self):
+        """Legacy/no-manifest credentials must not satisfy protected Pro requests."""
+        legacy = FakeCredential(id="legacy-1", label="legacy-cred", extra={})
+        request = RouteRequest(
+            platform="weixin",
+            channel="weixin-pro-exclusive",
+            entitlement="weixin-pro-exclusive",
+            provider="anthropic",
+        )
+        decision = route_with_capabilities([legacy], request)
+        assert decision.verdict == RoutingVerdict.blocked
+        assert decision.skipped[0].reason == RoutingFailureReason.entitlement_denied
 
     def test_mixed_pool_routes_correctly(self):
         """Pool with both Pro-exclusive and standard credentials:
@@ -305,9 +324,8 @@ class TestCapabilityParity:
         decision = route_with_capabilities([cred], request)
         assert decision.verdict == RoutingVerdict.selected
 
-    def test_credential_without_parity_class_accepts_any_request(self):
-        """Credential with empty parity_class passes any parity requirement
-        (backward compat for credentials without manifests)."""
+    def test_credential_without_parity_class_blocks_when_parity_required(self):
+        """Protected fallback requests require an explicit matching parity class."""
         cred = _make_credential("legacy-1", "legacy-cred", {
             "provider": "anthropic",
             # No parity_class specified
@@ -317,8 +335,8 @@ class TestCapabilityParity:
             required_parity_class="claude-sonnet",
         )
         decision = route_with_capabilities([cred], request)
-        # Empty manifest parity_class means the check is skipped (backward compat)
-        assert decision.verdict == RoutingVerdict.selected
+        assert decision.verdict == RoutingVerdict.blocked
+        assert decision.skipped[0].reason == RoutingFailureReason.parity_mismatch
 
 
 # ── Feature Requirement Tests ────────────────────────────────────────────
