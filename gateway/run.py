@@ -1967,6 +1967,35 @@ class GatewayRunner:
         route["request_overrides"] = overrides or {}
         return route
 
+    def _resolve_turn_fallback_model(
+        self,
+        user_config: Optional[dict],
+        source: Any = None,
+        runtime_kwargs: Optional[dict] = None,
+    ) -> list | dict | None:
+        """Return the AIAgent fallback chain allowed for this gateway turn.
+
+        Strict/exclusive gateway credential routes are fail-closed for both
+        runtime credential resolution and later provider/API-time auth errors.
+        Disabling ``fallback_model`` at AIAgent construction prevents the
+        agent's own fallback machinery from silently bypassing those routes.
+        """
+        runtime_kwargs = runtime_kwargs or {}
+        policy = _gateway_route_policy_for_source(
+            user_config,
+            source,
+            provider=runtime_kwargs.get("provider"),
+        )
+        if not _gateway_policy_allows_fallback(policy):
+            logger.info(
+                "Gateway credential route disables agent fallback: platform=%s chat=%s provider=%s",
+                getattr(getattr(source, "platform", None), "value", getattr(source, "platform", "")),
+                getattr(source, "chat_id", ""),
+                runtime_kwargs.get("provider") or "auto",
+            )
+            return None
+        return self._fallback_model
+
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
 
@@ -9725,6 +9754,7 @@ class GatewayRunner:
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            fallback_model = self._resolve_turn_fallback_model(user_config, source, runtime_kwargs)
 
             def run_sync():
                 agent = AIAgent(
@@ -9753,7 +9783,7 @@ class GatewayRunner:
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     session_db=self._session_db,
-                    fallback_model=self._fallback_model,
+                    fallback_model=fallback_model,
                 )
                 try:
                     return agent.run_conversation(
@@ -14374,16 +14404,19 @@ class GatewayRunner:
                     logger.debug("interim_assistant_callback error: %s", _e)
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            fallback_model = self._resolve_turn_fallback_model(user_config, source, runtime_kwargs)
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
             # schemas for prompt cache hits.
+            _cache_keys = dict(self._extract_cache_busting_config(user_config) or {})
+            _cache_keys["gateway_fallback_model"] = fallback_model
             _sig = self._agent_config_signature(
                 turn_route["model"],
                 turn_route["runtime"],
                 enabled_toolsets,
                 combined_ephemeral,
-                cache_keys=self._extract_cache_busting_config(user_config),
+                cache_keys=_cache_keys,
             )
             agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)
@@ -14434,7 +14467,7 @@ class GatewayRunner:
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
                     session_db=self._session_db,
-                    fallback_model=self._fallback_model,
+                    fallback_model=fallback_model,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
