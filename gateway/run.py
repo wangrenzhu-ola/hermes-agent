@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 
 import asyncio
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -63,6 +64,41 @@ _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+_WEIXIN_LTM_REVIEW_REQUIRED_TERMS = ("长期记忆", "记忆")
+_WEIXIN_LTM_REVIEW_ACTION_TERMS = ("整理", "审查", "检查", "review")
+_WEIXIN_LTM_REVIEW_REPORT_TERMS = ("报告", "汇报", "report")
+
+
+def _is_weixin_ltm_review_intent(text: str) -> bool:
+    """Detect explicit manual long-term-memory review requests."""
+    normalized = re.sub(r"\s+", "", (text or "").lower())
+    if not normalized:
+        return False
+    if not any(term in normalized for term in _WEIXIN_LTM_REVIEW_REQUIRED_TERMS):
+        return False
+    if not any(term in normalized for term in _WEIXIN_LTM_REVIEW_ACTION_TERMS):
+        return False
+    return any(term in normalized for term in _WEIXIN_LTM_REVIEW_REPORT_TERMS)
+
+
+def _ltm_review_run_id(source: Any, message_id: Optional[str]) -> str:
+    parts = [
+        "weixin-ltm-review",
+        str(getattr(source, "user_id", "") or "unknown"),
+        str(getattr(source, "chat_id", "") or "unknown"),
+        str(message_id or int(time.time())),
+    ]
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", "-".join(parts)).strip("-")[:120]
+
+
+def _file_sha256(path: Path) -> Optional[str]:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
@@ -5289,6 +5325,126 @@ class GatewayRunner:
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    def _should_handle_weixin_ltm_review(self, event: MessageEvent) -> bool:
+        source = event.source
+        return (
+            source.platform == Platform.WEIXIN
+            and source.chat_type == "dm"
+            and _is_weixin_ltm_review_intent(event.text or "")
+        )
+
+    async def _handle_weixin_ltm_review(self, event: MessageEvent) -> str:
+        adapter_script = (
+            _hermes_home
+            / "skills"
+            / "infra-sleep-skill"
+            / "references"
+            / "long_term_memory_review.py"
+        )
+        if not adapter_script.exists():
+            logger.error("Weixin LTM review adapter missing: %s", adapter_script)
+            return f"长期记忆整理适配器不存在：`{adapter_script}`"
+
+        run_id = _ltm_review_run_id(event.source, event.message_id)
+        output_dir = _hermes_home / "sleep-reports" / run_id
+        memory_path = _hermes_home / "memories" / "MEMORY.md"
+        user_profile_path = _hermes_home / "memories" / "USER.md"
+        read_only_paths = {
+            "MEMORY.md": memory_path,
+            "USER.md": user_profile_path,
+        }
+        before_sha = {name: _file_sha256(path) for name, path in read_only_paths.items()}
+        cmd = [
+            sys.executable,
+            str(adapter_script),
+            "--memory-path",
+            str(memory_path),
+            "--user-profile-path",
+            str(user_profile_path),
+            "--skills-root",
+            str(_hermes_home / "skills"),
+            "--output-dir",
+            str(output_dir),
+            "--run-id",
+            run_id,
+            "--pretty",
+        ]
+
+        logger.info(
+            "Handling Weixin LTM review intent via adapter: run_id=%s user=%s chat=%s",
+            run_id,
+            event.source.user_id,
+            event.source.chat_id,
+        )
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            logger.error("Weixin LTM review adapter timed out: run_id=%s", run_id)
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Weixin LTM review adapter did not terminate after timeout; killing: run_id=%s",
+                        run_id,
+                    )
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "Weixin LTM review adapter remained alive after kill: run_id=%s",
+                            run_id,
+                        )
+                except ProcessLookupError:
+                    pass
+            return "长期记忆整理超时，未生成报告。"
+        except Exception as exc:
+            logger.exception("Weixin LTM review adapter failed to start")
+            return f"长期记忆整理启动失败：{exc}"
+
+        if proc.returncode != 0:
+            detail = (stderr or stdout or b"").decode("utf-8", errors="replace").strip()
+            logger.error("Weixin LTM review adapter failed: run_id=%s error=%s", run_id, detail)
+            return f"长期记忆整理失败：{detail or 'adapter exited with an error'}"
+
+        after_sha = {name: _file_sha256(path) for name, path in read_only_paths.items()}
+        changed = [
+            name
+            for name in read_only_paths
+            if before_sha.get(name) != after_sha.get(name)
+        ]
+        if changed:
+            logger.error(
+                "Weixin LTM review read-only violation: run_id=%s changed=%s before=%s after=%s",
+                run_id,
+                changed,
+                before_sha,
+                after_sha,
+            )
+            return (
+                "长期记忆整理安全校验失败："
+                f"{', '.join(changed)} 在只读整理期间发生变化，已中止返回报告。"
+            )
+
+        try:
+            result = json.loads(stdout.decode("utf-8"))
+            user_message_path = Path(result["user_message_path"])
+            return user_message_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.exception("Weixin LTM review adapter returned invalid output")
+            return f"长期记忆整理结果读取失败：{exc}"
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -5392,6 +5548,9 @@ class GatewayRunner:
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
+
+        if self._should_handle_weixin_ltm_review(event):
+            return await self._handle_weixin_ltm_review(event)
         
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
