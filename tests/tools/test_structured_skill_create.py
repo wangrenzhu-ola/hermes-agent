@@ -219,6 +219,26 @@ class TestValidateSkillCreateRequest:
             "message": "support file path 'references/guide.md' is duplicated.",
         } in validation["errors"]
 
+    def test_support_file_path_prefix_conflicts_are_rejected(self):
+        validation = validate_skill_create_request(
+            _valid_request(
+                support_files=[
+                    {"path": "references/guide.md", "content": "one"},
+                    {"path": "references/guide.md/nested.txt", "content": "two"},
+                ]
+            )
+        )
+
+        assert validation["valid"] is False
+        assert {
+            "code": "FILE_PATH_CONFLICT",
+            "field": "support_files[1].path",
+            "message": (
+                "support file path 'references/guide.md/nested.txt' conflicts with "
+                "earlier file path 'references/guide.md'."
+            ),
+        } in validation["errors"]
+
     def test_support_file_unknown_field_is_rejected(self):
         validation = validate_skill_create_request(
             _valid_request(
@@ -461,6 +481,30 @@ Use for structured skill creation.
                 "code": "UNSAFE_FILE_PATH",
                 "field": "support_files[1].path",
                 "message": "Path traversal ('..') is not allowed.",
+            }
+        ]
+        assert not (tmp_path / "structured-skill").exists()
+
+    def test_write_true_rejects_support_file_prefix_conflict_without_partial_skill_dir(self, tmp_path):
+        request = _valid_request(
+            support_files=[
+                {"path": "references/guide.md", "content": "# Guide\n"},
+                {"path": "references/guide.md/nested.txt", "content": "nested\n"},
+            ]
+        )
+
+        result = structured_skill_create_result(request, skills_root=tmp_path, write=True)
+
+        assert result["status"] == "validation_error"
+        assert result["files_written"] == []
+        assert result["validation"]["errors"] == [
+            {
+                "code": "FILE_PATH_CONFLICT",
+                "field": "support_files[1].path",
+                "message": (
+                    "support file path 'references/guide.md/nested.txt' conflicts with "
+                    "earlier file path 'references/guide.md'."
+                ),
             }
         ]
         assert not (tmp_path / "structured-skill").exists()
