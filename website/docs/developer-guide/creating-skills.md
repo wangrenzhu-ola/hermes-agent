@@ -8,6 +8,8 @@ description: "How to create skills for Hermes Agent — SKILL.md format, guideli
 
 Skills are the preferred way to add new capabilities to Hermes Agent. They're easier to create than tools, require no code changes to the agent, and can be shared with the community.
 
+Hermes agents that create skills programmatically should use the structured skill creation contract in `tools.structured_skill_create` instead of assembling full `SKILL.md` files in prompt text. See `docs/structured-skill-create.md` for the versioned request/result schema, safe support-file rules, result parsing guidance, and isolated smoke pattern.
+
 ## Should it be a Skill or a Tool?
 
 Make it a **Skill** when:
