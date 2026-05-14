@@ -591,7 +591,8 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if name in disabled:
                     continue
 
-                description = frontmatter.get("description", "")
+                from agent.skill_utils import normalize_skill_description
+                description = normalize_skill_description(frontmatter)
                 if not description:
                     for line in body.strip().split("\n"):
                         line = line.strip()
@@ -796,7 +797,8 @@ def _serve_plugin_skill(
             namespace, bare,
         )
 
-    description = str(parsed_frontmatter.get("description", ""))
+    from agent.skill_utils import normalize_skill_description
+    description = normalize_skill_description(parsed_frontmatter)
     if len(description) > MAX_DESCRIPTION_LENGTH:
         description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
 
@@ -868,6 +870,8 @@ def skill_view(
         JSON string with skill content or error message
     """
     try:
+        from agent.skill_utils import normalize_skill_description
+
         local_category_name: str | None = None
         # ── Qualified name dispatch (plugin skills) ──────────────────
         # Names containing ':' are routed to the plugin skill registry.
@@ -983,7 +987,15 @@ def skill_view(
                 from agent.skill_utils import iter_skill_index_files
 
                 for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
-                    if found_skill_md.parent.name == name:
+                    resolved_name = found_skill_md.parent.name
+                    try:
+                        content = found_skill_md.read_text(encoding="utf-8")[:4000]
+                        frontmatter, _ = _parse_frontmatter(content)
+                        resolved_name = frontmatter.get("name", resolved_name)
+                    except Exception:
+                        pass
+
+                    if resolved_name == name:
                         skill_dir = found_skill_md.parent
                         skill_md = found_skill_md
                         break
@@ -1347,7 +1359,7 @@ def skill_view(
         result = {
             "success": True,
             "name": skill_name,
-            "description": frontmatter.get("description", ""),
+            "description": normalize_skill_description(frontmatter),
             "tags": tags,
             "related_skills": related_skills,
             "content": rendered_content,
@@ -1530,4 +1542,3 @@ registry.register(
     check_fn=check_skills_requirements,
     emoji="📚",
 )
-

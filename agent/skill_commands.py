@@ -275,7 +275,8 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     # Respect user's disabled skills config
                     if name in disabled:
                         continue
-                    description = frontmatter.get('description', '')
+                    from agent.skill_utils import normalize_skill_description
+                    description = normalize_skill_description(frontmatter)
                     if not description:
                         for line in body.strip().split('\n'):
                             line = line.strip()
