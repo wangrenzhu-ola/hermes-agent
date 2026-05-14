@@ -1883,7 +1883,16 @@ class GatewayRunner:
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs(source=source)
+        try:
+            runtime_kwargs = _resolve_runtime_agent_kwargs(source=source)
+        except TypeError as exc:
+            # Several tests (and possible third-party embedders) monkeypatch
+            # this resolver with a legacy no-arg callable. Preserve the
+            # source-aware path in production while keeping that legacy test
+            # seam compatible.
+            if "source" not in str(exc):
+                raise
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(
@@ -9529,7 +9538,14 @@ class GatewayRunner:
             _, cleaned = adapter.extract_images(response)
             local_files, _ = adapter.extract_local_files(cleaned)
 
-            _thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
+            _thread_metadata = getattr(self, "_thread_metadata_for_source", None)
+            _reply_anchor = getattr(self, "_reply_anchor_for_event", None)
+            if callable(_thread_metadata):
+                anchor = _reply_anchor(event) if callable(_reply_anchor) else None
+                _thread_meta = _thread_metadata(event.source, anchor)
+            else:
+                thread_id = getattr(event.source, "thread_id", None)
+                _thread_meta = {"thread_id": thread_id} if thread_id else None
 
             from gateway.platforms.base import should_send_media_as_audio
 
