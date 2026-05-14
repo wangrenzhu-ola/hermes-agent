@@ -33,7 +33,10 @@ def test_iter_skill_index_files_ignores_runtime_pollution_dirs(tmp_path):
 
     discovered = [p.relative_to(skills_root) for p in iter_skill_index_files(skills_root, "SKILL.md")]
 
-    assert discovered == [Path("software-development/galeharness-compound-workflow/SKILL.md")]
+    assert discovered == [
+        Path("business/memory/skills/memory-copy/SKILL.md"),
+        Path("software-development/galeharness-compound-workflow/SKILL.md"),
+    ]
 
 
 def test_skills_tool_find_prefers_canonical_skill_over_nested_runtime_copy(tmp_path, monkeypatch):

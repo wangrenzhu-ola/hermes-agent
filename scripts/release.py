@@ -304,6 +304,10 @@ AUTHOR_MAP = {
     "bloodcarter@gmail.com": "bloodcarter",
     "scott@scotttrinh.com": "scotttrinh",
     "quocanh261997@gmail.com": "quocanh261997",
+    # GCW issue 17 upstream reconciliation contributors (May 2026)
+    "nightcityblade@gmail.com": "nightcityblade",
+    "robin@soal.org": "rewbs",
+    "wangrenzhu2014@gmail.com": "wangrenzhu-ola",
     # contributors (from noreply pattern)
     "david.vv@icloud.com": "davidvv",
     "wangqiang@wangqiangdeMac-mini.local": "xiaoqiang243",
