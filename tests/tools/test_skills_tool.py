@@ -305,6 +305,35 @@ class TestSkillsList:
         result = json.loads(raw)
         assert result["count"] == 2
 
+    def test_folded_description_renders_text(self, tmp_path):
+        skill_dir = tmp_path / "folded"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """\
+---
+name: folded
+description: >-
+  Detects fixed font sizes,
+  clipped labels, and Dynamic Type suppression.
+---
+
+# Folded
+""",
+            encoding="utf-8",
+        )
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            list_result = json.loads(skills_list())
+            view_result = json.loads(skill_view("folded"))
+
+        assert list_result["skills"][0]["description"] == (
+            "Detects fixed font sizes, clipped labels, and Dynamic Type suppression."
+        )
+        assert view_result["description"] == (
+            "Detects fixed font sizes, clipped labels, and Dynamic Type suppression."
+        )
+        assert list_result["skills"][0]["description"] != ">-"
+
     def test_category_filter(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "skill-a", category="devops")
@@ -346,6 +375,32 @@ class TestSkillView:
         assert result["success"] is True
         assert result["name"] == "my-skill"
         assert "Step 1" in result["content"]
+
+    def test_view_existing_skill_by_frontmatter_name(self, tmp_path):
+        skill_dir = tmp_path / "app-store-review"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """\
+---
+name: apple-app-review-skills
+description: App Store review umbrella.
+---
+
+# Apple App Review
+
+See references/rules-index.json.
+""",
+            encoding="utf-8",
+        )
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            list_result = json.loads(skills_list())
+            view_result = json.loads(skill_view("apple-app-review-skills"))
+
+        assert list_result["skills"][0]["name"] == "apple-app-review-skills"
+        assert view_result["success"] is True
+        assert view_result["name"] == "apple-app-review-skills"
+        assert "references/rules-index.json" in view_result["content"]
 
     def test_skill_view_applies_template_vars(self, tmp_path):
         with (

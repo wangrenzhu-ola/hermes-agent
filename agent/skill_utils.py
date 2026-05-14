@@ -463,13 +463,18 @@ def resolve_skill_config_values(
 
 def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
     """Extract a truncated description from parsed frontmatter."""
-    raw_desc = frontmatter.get("description", "")
-    if not raw_desc:
-        return ""
-    desc = str(raw_desc).strip().strip("'\"")
+    desc = normalize_skill_description(frontmatter)
     if len(desc) > 60:
         return desc[:57] + "..."
     return desc
+
+
+def normalize_skill_description(frontmatter: Dict[str, Any]) -> str:
+    """Return display-ready skill description text from parsed frontmatter."""
+    raw_desc = frontmatter.get("description", "")
+    if not raw_desc:
+        return ""
+    return str(raw_desc).strip().strip("'\"")
 
 
 # ── File iteration ────────────────────────────────────────────────────────

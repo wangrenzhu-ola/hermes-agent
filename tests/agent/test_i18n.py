@@ -13,6 +13,16 @@ from agent import i18n
 LOCALES_DIR = Path(__file__).resolve().parents[2] / "locales"
 
 
+@pytest.fixture(autouse=True)
+def _reset_i18n_cache_between_tests():
+    # Some tests monkeypatch the locale directory. The module-level catalog
+    # cache is intentionally process-wide, so clear it both before and after
+    # each test to avoid xdist order-dependent misses in later gateway tests.
+    i18n.reset_language_cache()
+    yield
+    i18n.reset_language_cache()
+
+
 def _load_raw(lang: str) -> dict:
     with (LOCALES_DIR / f"{lang}.yaml").open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)

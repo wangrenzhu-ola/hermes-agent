@@ -56,6 +56,31 @@ class TestScanSkillCommands:
         assert "/my-skill" in result
         assert result["/my-skill"]["name"] == "my-skill"
 
+    def test_folded_description_renders_text(self, tmp_path):
+        skill_dir = tmp_path / "folded-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """\
+---
+name: folded-skill
+description: >-
+  Detects fixed font sizes,
+  clipped labels, and Dynamic Type suppression.
+---
+
+# Folded Skill
+""",
+            encoding="utf-8",
+        )
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            result = scan_skill_commands()
+
+        assert result["/folded-skill"]["description"] == (
+            "Detects fixed font sizes, clipped labels, and Dynamic Type suppression."
+        )
+        assert result["/folded-skill"]["description"] != ">-"
+
     def test_empty_dir(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             result = scan_skill_commands()

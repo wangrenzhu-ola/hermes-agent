@@ -1,6 +1,10 @@
 """Tests for agent/skill_utils.py — extract_skill_conditions metadata handling."""
 
-from agent.skill_utils import extract_skill_conditions
+from agent.skill_utils import (
+    extract_skill_conditions,
+    normalize_skill_description,
+    parse_frontmatter,
+)
 
 
 def test_metadata_as_dict_with_hermes():
@@ -56,3 +60,49 @@ def test_metadata_missing_entirely():
         "fallback_for_tools": [],
         "requires_tools": [],
     }
+
+
+def test_parse_frontmatter_folded_description_normalizes_to_text():
+    content = """\
+---
+name: folded-skill
+description: >-
+  Detects fixed font sizes,
+  clipped labels, and Dynamic Type suppression.
+---
+
+# Folded Skill
+"""
+    frontmatter, _ = parse_frontmatter(content)
+    assert (
+        normalize_skill_description(frontmatter)
+        == "Detects fixed font sizes, clipped labels, and Dynamic Type suppression."
+    )
+
+
+def test_parse_frontmatter_literal_description_normalizes_to_text():
+    content = """\
+---
+name: literal-skill
+description: |
+  First line.
+  Second line.
+---
+
+# Literal Skill
+"""
+    frontmatter, _ = parse_frontmatter(content)
+    assert normalize_skill_description(frontmatter) == "First line.\nSecond line."
+
+
+def test_parse_frontmatter_quoted_description_still_supported():
+    content = """\
+---
+name: quoted-skill
+description: "A quoted one-line description."
+---
+
+# Quoted Skill
+"""
+    frontmatter, _ = parse_frontmatter(content)
+    assert normalize_skill_description(frontmatter) == "A quoted one-line description."
