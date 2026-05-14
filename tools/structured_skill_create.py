@@ -8,7 +8,7 @@ of this contract without making callers parse free-form text.
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -43,6 +43,7 @@ VALIDATION_ERROR_CODES = (
     "INVALID_CATEGORY",
     "UNSAFE_FILE_PATH",
     "DUPLICATE_FILE_PATH",
+    "FILE_PATH_CONFLICT",
     "DUPLICATE_SKILL",
     "INVALID_FRONTMATTER",
 )
@@ -354,6 +355,7 @@ def validate_skill_create_request(request: Any) -> dict[str, Any]:
         )
     else:
         seen_paths: set[str] = set()
+        seen_path_parts: dict[str, tuple[str, ...]] = {}
         for index, support_file in enumerate(support_files):
             if not isinstance(support_file, dict):
                 errors.append(
@@ -400,7 +402,34 @@ def validate_skill_create_request(request: Any) -> dict[str, Any]:
                         }
                     )
                 else:
+                    path_parts = PurePosixPath(file_path).parts
+                    for existing_path, existing_parts in seen_path_parts.items():
+                        if path_parts[: len(existing_parts)] == existing_parts:
+                            errors.append(
+                                {
+                                    "code": "FILE_PATH_CONFLICT",
+                                    "field": f"support_files[{index}].path",
+                                    "message": (
+                                        f"support file path {file_path!r} conflicts with "
+                                        f"earlier file path {existing_path!r}."
+                                    ),
+                                }
+                            )
+                            break
+                        if existing_parts[: len(path_parts)] == path_parts:
+                            errors.append(
+                                {
+                                    "code": "FILE_PATH_CONFLICT",
+                                    "field": f"support_files[{index}].path",
+                                    "message": (
+                                        f"support file path {file_path!r} conflicts with "
+                                        f"earlier nested file path {existing_path!r}."
+                                    ),
+                                }
+                            )
+                            break
                     seen_paths.add(file_path)
+                    seen_path_parts[file_path] = path_parts
             if not isinstance(support_file.get("content"), str):
                 errors.append(
                     {
