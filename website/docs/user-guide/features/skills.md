@@ -234,6 +234,8 @@ All four skills appear in your skill index. If you create a new skill called `my
 
 The agent can create, update, and delete its own skills via the `skill_manage` tool. This is the agent's **procedural memory** — when it figures out a non-trivial workflow, it saves the approach as a skill for future reuse.
 
+For new agent-authored skills, Hermes also provides a structured creation contract in `tools.structured_skill_create`. Agents pass a versioned request with `schema_version`, `name`, `description`, `instructions`, and optional support files; Hermes validates names and paths, renders deterministic files, and returns a versioned machine-readable result. Developer-facing usage is documented in `docs/structured-skill-create.md`.
+
 ### When the Agent Creates Skills
 
 - After completing a complex task (5+ tool calls) successfully
