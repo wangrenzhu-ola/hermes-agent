@@ -19,6 +19,7 @@ from agent.credential_pool import (
     STRATEGY_ROUND_ROBIN,
     STRATEGY_RANDOM,
     STRATEGY_LEAST_USED,
+    STRATEGY_ADAPTIVE,
     PooledCredential,
     _exhausted_until,
     _normalize_custom_pool_name,
@@ -652,7 +653,13 @@ def _interactive_reset() -> None:
 def _interactive_strategy() -> None:
     provider = _pick_provider("Provider to set strategy for")
     current = get_pool_strategy(provider)
-    strategies = [STRATEGY_FILL_FIRST, STRATEGY_ROUND_ROBIN, STRATEGY_LEAST_USED, STRATEGY_RANDOM]
+    strategies = [
+        STRATEGY_FILL_FIRST,
+        STRATEGY_ROUND_ROBIN,
+        STRATEGY_LEAST_USED,
+        STRATEGY_RANDOM,
+        STRATEGY_ADAPTIVE,
+    ]
 
     print(f"\nCurrent strategy for {provider}: {current}")
     print()
@@ -661,13 +668,14 @@ def _interactive_strategy() -> None:
         STRATEGY_ROUND_ROBIN: "Cycle through keys evenly",
         STRATEGY_LEAST_USED: "Always pick the least-used key",
         STRATEGY_RANDOM: "Random selection",
+        STRATEGY_ADAPTIVE: "Rank healthy keys by quota, cooldown, failures, and active leases",
     }
     for i, s in enumerate(strategies, 1):
         marker = " ←" if s == current else ""
         print(f"  {i}. {s:15s} — {descriptions.get(s, '')}{marker}")
 
     try:
-        raw = input("\nStrategy [1-4]: ").strip()
+        raw = input("\nStrategy [1-5]: ").strip()
     except (EOFError, KeyboardInterrupt):
         return
     if not raw:
@@ -682,11 +690,11 @@ def _interactive_strategy() -> None:
 
     from hermes_cli.config import load_config, save_config
     cfg = load_config()
-    pool_strategies = cfg.get("credential_pool_strategies") or {}
+    pool_strategies = cfg.get("pool_strategies") or {}
     if not isinstance(pool_strategies, dict):
         pool_strategies = {}
     pool_strategies[provider] = strategy
-    cfg["credential_pool_strategies"] = pool_strategies
+    cfg["pool_strategies"] = pool_strategies
     save_config(cfg)
     print(f"Set {provider} strategy to: {strategy}")
 

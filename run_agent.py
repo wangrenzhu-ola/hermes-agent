@@ -6756,6 +6756,71 @@ class AIAgent:
             elif status_code in (401, 403):
                 effective_reason = FailoverReason.auth
 
+        def _pool_bool(method_name: str, default: bool = False) -> bool:
+            method = getattr(pool, method_name, None)
+            if callable(method):
+                try:
+                    result = method()
+                    return result if isinstance(result, bool) else default
+                except Exception:
+                    return default
+            return default
+
+        def _pool_int(method_name: str, default: int) -> int:
+            method = getattr(pool, method_name, None)
+            if callable(method):
+                try:
+                    result = method()
+                    return int(result) if isinstance(result, int) and not isinstance(result, bool) else default
+                except Exception:
+                    return default
+            return default
+
+        transient_reasons = {
+            FailoverReason.timeout,
+            FailoverReason.server_error,
+            FailoverReason.overloaded,
+        }
+
+        if effective_reason in transient_reasons and _pool_bool("same_provider_failover_first"):
+            transient_count = int(getattr(self, "_transient_pool_failover_count", 0) or 0)
+            max_failovers = _pool_int("max_transient_pool_failovers", 0)
+            if max_failovers <= 0 or transient_count >= max_failovers:
+                logger.info(
+                    "Credential pool transient failover limit reached provider=%s reason=%s count=%d max=%d",
+                    getattr(self, "provider", "?"),
+                    effective_reason.value,
+                    transient_count,
+                    max_failovers,
+                )
+                return False, has_retried_429
+
+            cooldown_seconds = _pool_int("transient_cooldown_seconds", 120)
+            transient_context = dict(error_context or {})
+            transient_context.setdefault("reason", effective_reason.value)
+            transient_context.setdefault("reset_at", time.time() + cooldown_seconds)
+            rotate_status = status_code if status_code is not None else 503
+            next_entry = pool.mark_exhausted_and_rotate(
+                status_code=rotate_status,
+                error_context=transient_context,
+            )
+            if next_entry is not None:
+                self._transient_pool_failover_count = transient_count + 1
+                logger.info(
+                    "Credential transient %s — same-provider rotation %d/%d to pool entry %s",
+                    effective_reason.value,
+                    self._transient_pool_failover_count,
+                    max_failovers,
+                    getattr(next_entry, "id", "?"),
+                )
+                self._swap_credential(next_entry)
+                return True, False
+            logger.info(
+                "Credential transient %s — no same-provider pool entry available before provider fallback",
+                effective_reason.value,
+            )
+            return False, has_retried_429
+
         if effective_reason == FailoverReason.billing:
             rotate_status = status_code if status_code is not None else 402
             next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
@@ -6766,11 +6831,13 @@ class AIAgent:
                     getattr(next_entry, "id", "?"),
                 )
                 self._swap_credential(next_entry)
+                self._transient_pool_failover_count = 0
                 return True, False
             return False, has_retried_429
 
         if effective_reason == FailoverReason.rate_limit:
-            if not has_retried_429:
+            rotate_first = _pool_bool("same_provider_failover_first")
+            if not has_retried_429 and not rotate_first:
                 return False, True
             rotate_status = status_code if status_code is not None else 429
             next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
@@ -6781,6 +6848,7 @@ class AIAgent:
                     getattr(next_entry, "id", "?"),
                 )
                 self._swap_credential(next_entry)
+                self._transient_pool_failover_count = 0
                 return True, False
             return False, True
 
@@ -6789,6 +6857,7 @@ class AIAgent:
             if refreshed is not None:
                 logger.info(f"Credential auth failure — refreshed pool entry {getattr(refreshed, 'id', '?')}")
                 self._swap_credential(refreshed)
+                self._transient_pool_failover_count = 0
                 return True, has_retried_429
             # Refresh failed — rotate to next credential instead of giving up.
             # The failed entry is already marked exhausted by try_refresh_current().
@@ -6801,6 +6870,7 @@ class AIAgent:
                     getattr(next_entry, "id", "?"),
                 )
                 self._swap_credential(next_entry)
+                self._transient_pool_failover_count = 0
                 return True, False
 
         return False, has_retried_429
@@ -8047,6 +8117,54 @@ class AIAgent:
                 self._rate_limited_until = time.monotonic() + 60
         if self._fallback_index >= len(self._fallback_chain):
             return False
+
+        pool = getattr(self, "_credential_pool", None)
+        current_provider_for_pool = (getattr(self, "provider", "") or "").strip().lower()
+        raw_pool_provider = getattr(pool, "provider", "") if pool is not None else ""
+        pool_provider = raw_pool_provider.strip().lower() if isinstance(raw_pool_provider, str) else ""
+        if pool is not None and (not pool_provider or pool_provider == current_provider_for_pool):
+            allow_fallback_method = getattr(pool, "provider_fallback_after_pool_exhausted", None)
+            allow_fallback = True
+            if callable(allow_fallback_method):
+                try:
+                    allow_fallback = bool(allow_fallback_method())
+                except Exception:
+                    allow_fallback = True
+            pool_available = False
+            has_available = getattr(pool, "has_available", None)
+            if callable(has_available):
+                try:
+                    pool_available = bool(has_available())
+                except Exception:
+                    pool_available = False
+            if not allow_fallback and pool_available:
+                logging.info(
+                    "Provider fallback blocked: provider=%s pool still has same-provider candidates reason=%s",
+                    current_provider_for_pool,
+                    reason.value if reason else "unknown",
+                )
+                return False
+            entry_count = "unknown"
+            available_count = "unknown"
+            try:
+                if callable(getattr(pool, "entry_count", None)):
+                    entry_count = pool.entry_count()
+                elif callable(getattr(pool, "entries", None)):
+                    entry_count = len(pool.entries())
+                if callable(getattr(pool, "available_count", None)):
+                    available_count = pool.available_count()
+                elif callable(has_available):
+                    available_count = 1 if pool_available else 0
+            except Exception:
+                pass
+            logging.info(
+                "Provider fallback: provider=%s reason=%s pool_entries=%s pool_available=%s transient_pool_failovers=%s",
+                current_provider_for_pool,
+                reason.value if reason else "unknown",
+                entry_count,
+                available_count,
+                getattr(self, "_transient_pool_failover_count", 0),
+            )
 
         fb = self._fallback_chain[self._fallback_index]
         self._fallback_index += 1

@@ -178,6 +178,261 @@ def test_random_strategy_uses_random_choice(tmp_path, monkeypatch):
     assert selected.id == "cred-2"
 
 
+def test_pool_strategy_prefers_new_pool_strategies_alias(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "credential_pool": {"openai-codex": []}})
+    config_path = tmp_path / "hermes" / "config.yaml"
+    config_path.write_text(
+        "credential_pool_strategies:\n"
+        "  openai-codex: round_robin\n"
+        "pool_strategies:\n"
+        "  openai-codex: adaptive\n"
+    )
+
+    from agent.credential_pool import get_pool_strategy
+
+    assert get_pool_strategy("openai-codex") == "adaptive"
+
+
+def test_adaptive_strategy_hard_skips_fresh_high_weekly_quota(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    now = time.time()
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "high-weekly",
+                        "label": "high weekly",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual",
+                        "access_token": "tok-1",
+                        "quota": {
+                            "primary_percent": 20,
+                            "secondary_percent": 95,
+                            "observed_at": now,
+                        },
+                    },
+                    {
+                        "id": "healthy",
+                        "label": "healthy",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual",
+                        "access_token": "tok-2",
+                        "quota": {
+                            "primary_percent": 20,
+                            "secondary_percent": 40,
+                            "observed_at": now,
+                        },
+                    },
+                ]
+            },
+        },
+    )
+    (tmp_path / "hermes" / "config.yaml").write_text(
+        "pool_strategies:\n"
+        "  openai-codex: adaptive\n"
+        "pool_policies:\n"
+        "  openai-codex:\n"
+        "    secondary_hard_skip_percent: 90\n"
+        "    quota_refresh_ttl_seconds: 300\n"
+    )
+
+    from agent.credential_pool import load_pool
+
+    with caplog.at_level("INFO"):
+        selected = load_pool("openai-codex").select()
+
+    assert selected is not None
+    assert selected.id == "healthy"
+    assert "decision=hard_skipped" in caplog.text
+    assert "high-weekly" in caplog.text
+
+
+def test_adaptive_strategy_soft_penalizes_weekly_quota_and_lease_pressure(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    now = time.time()
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "soft-weekly",
+                        "label": "soft weekly",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual",
+                        "access_token": "tok-1",
+                        "quota": {
+                            "primary_percent": 20,
+                            "secondary_percent": 80,
+                            "observed_at": now,
+                        },
+                    },
+                    {
+                        "id": "low-weekly",
+                        "label": "low weekly",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual",
+                        "access_token": "tok-2",
+                        "quota": {
+                            "primary_percent": 20,
+                            "secondary_percent": 20,
+                            "observed_at": now,
+                        },
+                    },
+                ]
+            },
+        },
+    )
+    (tmp_path / "hermes" / "config.yaml").write_text(
+        "pool_strategies:\n"
+        "  openai-codex: adaptive\n"
+        "pool_policies:\n"
+        "  openai-codex:\n"
+        "    secondary_soft_penalty_percent: 75\n"
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    pool.acquire_lease("low-weekly")
+    with caplog.at_level("INFO"):
+        selected = pool.select()
+
+    assert selected is not None
+    assert selected.id == "soft-weekly"
+    assert "decision=soft_penalized" in caplog.text
+
+
+def test_adaptive_strategy_logs_stale_or_missing_codex_quota_but_fails_open(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "stale",
+                        "label": "stale",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual",
+                        "access_token": "tok-1",
+                        "quota": {
+                            "primary_percent": 99,
+                            "secondary_percent": 99,
+                            "observed_at": time.time() - 9999,
+                        },
+                    },
+                    {
+                        "id": "missing",
+                        "label": "missing",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual",
+                        "access_token": "tok-2",
+                    },
+                ]
+            },
+        },
+    )
+    (tmp_path / "hermes" / "config.yaml").write_text(
+        "pool_strategies:\n"
+        "  openai-codex: adaptive\n"
+        "pool_policies:\n"
+        "  openai-codex:\n"
+        "    quota_refresh_ttl_seconds: 300\n"
+    )
+
+    from agent.credential_pool import load_pool
+
+    with caplog.at_level("WARNING"):
+        selected = load_pool("openai-codex").select()
+
+    assert selected is not None
+    assert selected.id == "stale"
+    assert "decision=quota_stale" in caplog.text
+
+
+def test_adaptive_strategy_opens_provider_circuit_after_recent_failures(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    now = time.time()
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "failed-a",
+                        "label": "failed a",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual",
+                        "access_token": "***",
+                        "last_status": "exhausted",
+                        "last_status_at": now,
+                        "last_error_code": 503,
+                        "last_error_reset_at": now + 120,
+                    },
+                    {
+                        "id": "failed-b",
+                        "label": "failed b",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual",
+                        "access_token": "***",
+                        "last_status": "exhausted",
+                        "last_status_at": now - 5,
+                        "last_error_code": 503,
+                        "last_error_reset_at": now + 120,
+                    },
+                    {
+                        "id": "otherwise-healthy",
+                        "label": "otherwise healthy",
+                        "auth_type": "oauth",
+                        "priority": 2,
+                        "source": "manual",
+                        "access_token": "***",
+                        "quota": {
+                            "primary_percent": 10,
+                            "secondary_percent": 10,
+                            "observed_at": now,
+                        },
+                    },
+                ]
+            },
+        },
+    )
+    (tmp_path / "hermes" / "config.yaml").write_text(
+        "pool_strategies:\n"
+        "  openai-codex: adaptive\n"
+        "pool_policies:\n"
+        "  openai-codex:\n"
+        "    circuit_breaker:\n"
+        "      max_fails: 2\n"
+        "      fail_timeout_seconds: 180\n"
+        "      half_open_probe_interval_seconds: 60\n"
+    )
+
+    from agent.credential_pool import load_pool
+
+    with caplog.at_level("WARNING"):
+        selected = load_pool("openai-codex").select()
+
+    assert selected is None
+    assert "circuit open" in caplog.text
+    assert "recent_failures=2" in caplog.text
+
 
 def test_exhausted_entry_resets_after_ttl(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
