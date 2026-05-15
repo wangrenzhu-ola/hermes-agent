@@ -1007,7 +1007,11 @@ def _classify_by_message(
     # loop rebuilds the client instead of treating the turn as an empty
     # model response.
     if any(p in error_msg for p in _TIMEOUT_MESSAGE_PATTERNS):
-        return result_fn(FailoverReason.timeout, retryable=True)
+        return result_fn(
+            FailoverReason.timeout,
+            retryable=True,
+            should_rotate_credential=True,
+        )
 
     return None
 
