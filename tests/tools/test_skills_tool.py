@@ -187,6 +187,13 @@ class TestGetCategoryFromPath:
             skill_md.touch()
             assert _get_category_from_path(skill_md) == "mlops"
 
+    def test_nested_categorized_skill_preserves_full_category_path(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            skill_md = tmp_path / "foundations" / "runtime" / "explore-codebase" / "SKILL.md"
+            skill_md.parent.mkdir(parents=True)
+            skill_md.touch()
+            assert _get_category_from_path(skill_md) == "foundations/runtime"
+
     def test_uncategorized_skill(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             skill_md = tmp_path / "my-skill" / "SKILL.md"
@@ -232,6 +239,13 @@ class TestFindAllSkills:
             skills = _find_all_skills()
         assert len(skills) == 1
         assert skills[0]["category"] == "mlops"
+
+    def test_nested_categorized_skills_preserve_full_category(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "explore-codebase", category="foundations/runtime")
+            skills = _find_all_skills()
+        assert len(skills) == 1
+        assert skills[0]["category"] == "foundations/runtime"
 
     def test_description_from_body_when_missing(self, tmp_path):
         """If no description in frontmatter, first non-header line is used."""
@@ -342,6 +356,16 @@ description: >-
         result = json.loads(raw)
         assert result["count"] == 1
         assert result["skills"][0]["name"] == "skill-a"
+
+    def test_nested_category_filter(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "explore-codebase", category="foundations/runtime")
+            raw = skills_list(category="foundations/runtime")
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["count"] == 1
+        assert result["categories"] == ["foundations/runtime"]
+        assert result["skills"][0]["name"] == "explore-codebase"
 
     def test_category_filter_finds_symlinked_category(self, tmp_path):
         external_root = tmp_path / "repo"

@@ -784,6 +784,8 @@ def _resolve_runtime_agent_kwargs(source: Any = None) -> dict:
                 primary_provider = str(_model_cfg.get("provider") or "").strip() or None
         except Exception:
             pass
+        if not primary_provider:
+            primary_provider = str(getattr(auth_exc, "provider", "") or "").strip() or None
         policy = _gateway_route_policy_for_source(_cfg, source, provider=primary_provider)
         if not _gateway_policy_allows_fallback(policy):
             logger.error(
@@ -15751,6 +15753,7 @@ class GatewayRunner:
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
+                    "runtime_metadata": result.get("runtime_metadata"),
                 }
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
@@ -15872,6 +15875,7 @@ class GatewayRunner:
                 "context_length": _context_length,
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
+                "runtime_metadata": result.get("runtime_metadata"),
             }
         
         # Start progress message sender if enabled

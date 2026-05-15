@@ -190,7 +190,7 @@ def _validate_name(name: str) -> Optional[str]:
 
 
 def _validate_category(category: Optional[str]) -> Optional[str]:
-    """Validate an optional category name used as a single directory segment."""
+    """Validate an optional category path made of safe directory segments."""
     if category is None:
         return None
     if not isinstance(category, str):
@@ -199,18 +199,22 @@ def _validate_category(category: Optional[str]) -> Optional[str]:
     category = category.strip()
     if not category:
         return None
-    if "/" in category or "\\" in category:
+    if "\\" in category:
         return (
             f"Invalid category '{category}'. Use lowercase letters, numbers, "
-            "hyphens, dots, and underscores. Categories must be a single directory name."
+            "hyphens, dots, underscores, and '/' between category segments."
         )
-    if len(category) > MAX_NAME_LENGTH:
-        return f"Category exceeds {MAX_NAME_LENGTH} characters."
-    if not VALID_NAME_RE.match(category):
-        return (
-            f"Invalid category '{category}'. Use lowercase letters, numbers, "
-            "hyphens, dots, and underscores. Categories must be a single directory name."
-        )
+    if len(category) > MAX_NAME_LENGTH * 4:
+        return f"Category exceeds {MAX_NAME_LENGTH * 4} characters."
+    parts = category.split("/")
+    if any(not part for part in parts):
+        return f"Invalid category '{category}'. Category segments must not be empty."
+    for part in parts:
+        if part in {".", ".."} or not VALID_NAME_RE.match(part):
+            return (
+                f"Invalid category '{category}'. Use lowercase letters, numbers, "
+                "hyphens, dots, underscores, and '/' between category segments."
+            )
     return None
 
 

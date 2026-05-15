@@ -87,7 +87,7 @@ SKILL_CREATE_REQUEST_SCHEMA_V1: dict[str, Any] = {
         },
         "category": {
             "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9._-]*$",
+            "pattern": "^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$",
         },
         "metadata": {
             "type": "object",
@@ -477,6 +477,41 @@ def _skill_relative_path(request: dict[str, Any], file_path: str | None = None) 
     return "/".join(parts)
 
 
+def _existing_skill_collision(skills_root: str | Path, skill_name: str, target_dir: Path) -> Path | None:
+    """Return an existing same-name skill path under *skills_root*, excluding target_dir.
+
+    Mirrors ``skill_view`` collision safety for structured skill creation: both
+    directory names and frontmatter ``name`` values can identify a skill.
+    """
+    from agent.skill_utils import iter_skill_index_files, parse_frontmatter
+
+    root = Path(skills_root).expanduser()
+    if not root.exists():
+        return None
+    try:
+        target_resolved = target_dir.resolve()
+    except Exception:
+        target_resolved = target_dir
+    for skill_md in iter_skill_index_files(root, "SKILL.md"):
+        parent = skill_md.parent
+        try:
+            if parent.resolve() == target_resolved:
+                continue
+        except Exception:
+            if parent == target_resolved:
+                continue
+        matches_dir = parent.name == skill_name
+        matches_frontmatter = False
+        try:
+            frontmatter, _ = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+            matches_frontmatter = str(frontmatter.get("name") or "").strip() == skill_name
+        except Exception:
+            pass
+        if matches_dir or matches_frontmatter:
+            return skill_md
+    return None
+
+
 def render_skill_md(request: dict[str, Any]) -> str:
     """Render a deterministic skill create request into SKILL.md content."""
     frontmatter: dict[str, Any] = {
@@ -583,12 +618,14 @@ def structured_skill_create_result(
                     "next_actions": ["Provide skills_root before requesting structured skill writes."],
                 }
             skill_dir = _skill_dir(skills_root, request)
-            if skill_dir.exists():
+            collision_path = _existing_skill_collision(skills_root, skill_name, skill_dir)
+            if skill_dir.exists() or collision_path is not None:
+                existing_path = collision_path or skill_dir
                 return {
                     "schema_version": RESULT_SCHEMA_VERSION,
                     "status": "validation_error",
                     "skill_name": skill_name,
-                    "path": str(skill_dir),
+                    "path": str(existing_path),
                     "files_written": [],
                     "validation": {
                         "valid": False,
@@ -596,7 +633,7 @@ def structured_skill_create_result(
                             {
                                 "code": "DUPLICATE_SKILL",
                                 "field": "name",
-                                "message": f"A skill named '{skill_name}' already exists at {skill_dir}.",
+                                "message": f"A skill named '{skill_name}' already exists at {existing_path}.",
                             }
                         ],
                     },

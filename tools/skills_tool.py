@@ -463,7 +463,10 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
             rel_path = skill_path.relative_to(skills_dir)
             parts = rel_path.parts
             if len(parts) >= 3:
-                return parts[0]
+                # Preserve nested category paths. A skill stored at
+                # ``foundations/runtime/explore-codebase/SKILL.md`` belongs to
+                # category ``foundations/runtime``, not just ``foundations``.
+                return "/".join(parts[:-2])
         except ValueError:
             continue
     return None
@@ -1016,7 +1019,9 @@ def skill_view(
                     _record(found_skill_md.parent, found_skill_md)
 
             # Strategy 3: legacy flat <name>.md files anywhere under the dir.
-            for found_md in search_dir.rglob(f"{name}.md"):
+            # Use the same filtered iterator as SKILL.md discovery so runtime
+            # workspaces like .pmo/.qoder cannot leak false candidates.
+            for found_md in iter_skill_index_files(search_dir, f"{name}.md"):
                 if found_md.name != "SKILL.md":
                     _record(None, found_md)
 

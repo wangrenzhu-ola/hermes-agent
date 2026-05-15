@@ -94,17 +94,21 @@ jobs:
           "
           fi
 
-          # --- Install-hook files (setup.py/sitecustomize/usercustomize/__init__.pth) ---
-          # These execute during pip install or interpreter startup.
-          SETUP_HITS=$(git diff --name-only "$BASE".."$HEAD" | grep -E '(^|/)(setup\.py|setup\.cfg|sitecustomize\.py|usercustomize\.py|__init__\.pth)$' || true)
-          if [ -n "$SETUP_HITS" ]; then
+          # --- Auto-startup install hooks ---
+          # .pth files are handled above.  sitecustomize/usercustomize/__init__.pth
+          # execute automatically on interpreter startup, so any add/modify is
+          # still high-signal.  setup.py/setup.cfg changes are common during
+          # normal package maintenance and are covered by the explicit payload
+          # patterns above instead of being blanket-blocked.
+          STARTUP_HOOK_HITS=$(git diff --name-only "$BASE".."$HEAD" | grep -E '(^|/)(sitecustomize\.py|usercustomize\.py|__init__\.pth)$' || true)
+          if [ -n "$STARTUP_HOOK_HITS" ]; then
             FINDINGS="${FINDINGS}
-          ### 🚨 CRITICAL: Install-hook file added or modified
-          These files can execute code during package installation or interpreter startup.
+          ### 🚨 CRITICAL: Python startup hook file added or modified
+          These files can execute automatically when Python starts — no import required.
 
           **Files:**
           \`\`\`
-          ${SETUP_HITS}
+          ${STARTUP_HOOK_HITS}
           \`\`\`
           "
           fi
@@ -128,7 +132,7 @@ jobs:
           $(cat /tmp/findings.md)
 
           ---
-          *Scanner only fires on high-signal indicators: .pth files, base64+exec/eval combos, subprocess with encoded commands, or install-hook files. Low-signal warnings were removed intentionally — if you're seeing this comment, the finding is worth inspecting.*"
+          *Scanner only fires on high-signal indicators: .pth files, base64+exec/eval combos, subprocess with encoded commands, or Python auto-startup hooks. Low-signal warnings were removed intentionally — if you're seeing this comment, the finding is worth inspecting.*"
 
           gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY" || echo "::warning::Could not post PR comment (expected for fork PRs — GITHUB_TOKEN is read-only)"
 

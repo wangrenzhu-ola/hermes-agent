@@ -49,6 +49,33 @@ def test_strict_gateway_route_fails_closed_without_fallback(monkeypatch):
     fallback.assert_not_called()
 
 
+def test_strict_gateway_route_uses_auth_error_provider_when_env_unset(monkeypatch):
+    """Provider-scoped strict routes must still match when runtime resolution owns provider selection."""
+    import gateway.run as run
+
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+    cfg = {
+        "gateway_credential_routing": {
+            "rules": [
+                {
+                    "platform": "weixin",
+                    "chat_id": "chat-1",
+                    "provider": "openai-codex",
+                    "fallback_policy": "fail_closed",
+                }
+            ]
+        }
+    }
+
+    with patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=AuthError("expired", provider="openai-codex")), \
+        patch.object(run, "_load_gateway_config", return_value=cfg), \
+        patch.object(run, "_try_resolve_fallback_provider") as fallback:
+        with pytest.raises(RuntimeError, match="fallback is disabled"):
+            run._resolve_runtime_agent_kwargs(source=_source())
+
+    fallback.assert_not_called()
+
+
 def test_non_strict_gateway_route_uses_fallback_with_metadata(monkeypatch):
     """Non-strict routes retain existing fallback behavior and expose fallback metadata."""
     import gateway.run as run
