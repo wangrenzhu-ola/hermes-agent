@@ -66,6 +66,7 @@ def _ensure_discord_mock():
     discord_mod.DMChannel = type("DMChannel", (), {})
     discord_mod.Thread = type("Thread", (), {})
     discord_mod.ForumChannel = type("ForumChannel", (), {})
+    discord_mod.Forbidden = type("Forbidden", (Exception,), {})
     discord_mod.Interaction = object
     discord_mod.app_commands = SimpleNamespace(
         describe=lambda **kwargs: (lambda fn: fn),
@@ -325,11 +326,17 @@ def make_fake_guild(guild_id: int = GUILD_ID, name: str = "Test Server"):
     return SimpleNamespace(id=guild_id, name=name)
 
 
+async def _empty_discord_history(*_args, **_kwargs):
+    if False:  # pragma: no cover - makes this an async generator
+        yield None
+
+
 def make_fake_text_channel(channel_id: int = CHANNEL_ID, name: str = "general", guild=None):
     return SimpleNamespace(
         id=channel_id, name=name,
         guild=guild or make_fake_guild(),
         topic=None, type=0,
+        history=_empty_discord_history,
     )
 
 

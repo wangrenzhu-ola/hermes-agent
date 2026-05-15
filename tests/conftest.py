@@ -482,6 +482,7 @@ def _reset_module_state():
     try:
         from agent import auxiliary_client as _aux_mod
         _aux_mod.clear_runtime_main()
+        _aux_mod._reset_aux_unhealthy_cache()
     except Exception:
         pass
 
