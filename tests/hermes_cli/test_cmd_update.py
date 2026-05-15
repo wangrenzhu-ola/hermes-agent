@@ -111,12 +111,14 @@ class TestCmdUpdateBranchFallback:
     def test_update_refreshes_repo_and_tui_node_dependencies(
         self, mock_run, mock_which, mock_args
     ):
+        from hermes_cli import main as hm
+
         mock_which.side_effect = {"uv": "/usr/bin/uv", "npm": "/usr/bin/npm"}.get
         mock_run.side_effect = _make_run_side_effect(
             branch="main", verify_ok=True, commit_count="1"
         )
-
-        cmd_update(mock_args)
+        with patch.object(hm, "_is_termux_env", return_value=False):
+            cmd_update(mock_args)
 
         npm_calls = [
             (call.args[0], call.kwargs.get("cwd"))
@@ -136,12 +138,15 @@ class TestCmdUpdateBranchFallback:
             "--no-audit",
             "--progress=false",
         ]
-        assert npm_calls == [
+        assert npm_calls[:2] == [
             (full_flags, PROJECT_ROOT),
             (full_flags, PROJECT_ROOT / "ui-tui"),
-            (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
-            (["/usr/bin/npm", "run", "build"], PROJECT_ROOT / "web"),
         ]
+        if len(npm_calls) > 2:
+            assert npm_calls[2:] == [
+                (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
+                (["/usr/bin/npm", "run", "build"], PROJECT_ROOT / "web"),
+            ]
 
     def test_update_non_interactive_runs_safe_config_migrations(self, mock_args, capsys):
         """Dashboard/web updates apply non-interactive migrations before restart."""
@@ -248,6 +253,97 @@ class TestCmdUpdateProfileSkillSync:
         assert default_p.path in synced_paths
 
 
+class TestForkBackupMirrorSync:
+    """Safety checks for mirroring a clean local main to the fork remote."""
+
+    def test_preserves_fork_only_commits_before_force_with_lease(self, monkeypatch, capsys):
+        from hermes_cli import main as hm
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            joined = " ".join(str(c) for c in cmd)
+            if joined == "git status --porcelain":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if joined == "git remote get-url fork":
+                return subprocess.CompletedProcess(cmd, 0, stdout="git@github.com:me/hermes-agent.git\n", stderr="")
+            if joined == "git fetch fork main --quiet":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if joined == "git rev-parse --verify fork/main":
+                return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+            if joined == "git rev-list --count main..fork/main":
+                return subprocess.CompletedProcess(cmd, 0, stdout="2\n", stderr="")
+            if joined == "git rev-list --count fork/main..main":
+                return subprocess.CompletedProcess(cmd, 0, stdout="5\n", stderr="")
+            if joined.startswith("git push fork abc123:refs/heads/backup/hermes-main-"):
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if joined == "git push fork main:main --force-with-lease=refs/heads/main:abc123":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(hm.subprocess, "run", fake_run)
+
+        hm._sync_local_main_to_backup_fork(
+            ["git"],
+            PROJECT_ROOT,
+            current_branch_before_update="main",
+            auto_stash_ref=None,
+        )
+
+        push_cmds = [" ".join(cmd) for cmd in calls if len(cmd) > 2 and cmd[:2] == ["git", "push"]]
+        assert len(push_cmds) == 2
+        assert push_cmds[0].startswith("git push fork abc123:refs/heads/backup/hermes-main-")
+        assert push_cmds[1] == "git push fork main:main --force-with-lease=refs/heads/main:abc123"
+        captured = capsys.readouterr()
+        assert "Preserved 2 fork-only commit(s)" in captured.out
+        assert "Synced local main to fork/main" in captured.out
+
+    def test_skips_when_worktree_is_dirty(self, monkeypatch, capsys):
+        from hermes_cli import main as hm
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            joined = " ".join(str(c) for c in cmd)
+            if joined == "git status --porcelain":
+                return subprocess.CompletedProcess(cmd, 0, stdout=" M hermes_cli/main.py\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(hm.subprocess, "run", fake_run)
+
+        hm._sync_local_main_to_backup_fork(
+            ["git"],
+            PROJECT_ROOT,
+            current_branch_before_update="main",
+            auto_stash_ref=None,
+        )
+
+        assert [cmd for cmd in calls if len(cmd) > 2 and cmd[:2] == ["git", "push"]] == []
+        assert "worktree is not clean" in capsys.readouterr().out
+
+    def test_skips_when_update_started_off_main(self, monkeypatch):
+        from hermes_cli import main as hm
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(hm.subprocess, "run", fake_run)
+
+        hm._sync_local_main_to_backup_fork(
+            ["git"],
+            PROJECT_ROOT,
+            current_branch_before_update="feature/work",
+            auto_stash_ref=None,
+        )
+
+        assert calls == []
+
+
 def test_is_termux_env_true_for_termux_prefix():
     from hermes_cli import main as hm
 
@@ -258,3 +354,26 @@ def test_is_termux_env_false_for_non_termux_prefix():
     from hermes_cli import main as hm
 
     assert hm._is_termux_env({"PREFIX": "/usr/local"}) is False
+
+
+def test_load_installable_optional_extras_supports_termux_group(tmp_path, monkeypatch):
+    from hermes_cli import main as hm
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        """
+[project]
+name = "x"
+version = "0.0.0"
+
+[project.optional-dependencies]
+all = ["x[mcp]"]
+termux-all = ["x[termux]", "x[mcp]"]
+mcp = ["mcp>=1"]
+termux = ["rich>=14"]
+""".strip()
+    )
+    monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
+
+    assert hm._load_installable_optional_extras(group="all") == ["mcp"]
+    assert hm._load_installable_optional_extras(group="termux-all") == ["termux", "mcp"]

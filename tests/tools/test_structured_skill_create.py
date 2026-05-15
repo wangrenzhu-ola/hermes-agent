@@ -132,12 +132,17 @@ class TestValidateSkillCreateRequest:
         assert validation["errors"][0]["code"] == "INVALID_SKILL_NAME"
         assert validation["errors"][0]["field"] == "name"
 
-    def test_category_must_be_single_safe_segment(self):
+    def test_category_must_be_safe_path_segments(self):
         validation = validate_skill_create_request(_valid_request(category="../escape"))
 
         assert validation["valid"] is False
         assert validation["errors"][0]["code"] == "INVALID_CATEGORY"
         assert validation["errors"][0]["field"] == "category"
+
+    def test_nested_category_is_valid(self):
+        validation = validate_skill_create_request(_valid_request(category="foundations/runtime"))
+
+        assert validation == {"valid": True, "errors": []}
 
     def test_unsafe_support_file_path_is_rejected(self):
         validation = validate_skill_create_request(
@@ -325,6 +330,14 @@ class TestStructuredSkillCreateResult:
 
         assert result["path"] == "/tmp/hermes-skills/writing/structured-skill"
 
+    def test_valid_nested_category_request_returns_nested_result_path(self):
+        result = structured_skill_create_result(
+            _valid_request(category="foundations/runtime"),
+            skills_root="/tmp/hermes-skills/",
+        )
+
+        assert result["path"] == "/tmp/hermes-skills/foundations/runtime/structured-skill"
+
     def test_invalid_request_returns_versioned_validation_error_envelope(self):
         result = structured_skill_create_result(_valid_request(schema_version="v0"))
 
@@ -385,7 +398,7 @@ Use for structured skill creation.
     def test_planned_skill_files_are_deterministic(self):
         files = planned_skill_files(
             _valid_request(
-                category="coding",
+                category="foundations/runtime",
                 support_files=[
                     {"path": "references/guide.md", "content": "# Guide"},
                     {"path": "scripts/helper.py", "content": "print('ok')"},
@@ -394,9 +407,9 @@ Use for structured skill creation.
         )
 
         assert files == [
-            "coding/structured-skill/SKILL.md",
-            "coding/structured-skill/references/guide.md",
-            "coding/structured-skill/scripts/helper.py",
+            "foundations/runtime/structured-skill/SKILL.md",
+            "foundations/runtime/structured-skill/references/guide.md",
+            "foundations/runtime/structured-skill/scripts/helper.py",
         ]
 
     def test_write_true_creates_valid_skill_md_and_support_files(self, tmp_path):
@@ -463,6 +476,20 @@ Use for structured skill creation.
                 "message": f"A skill named 'structured-skill' already exists at {tmp_path / 'structured-skill'}.",
             }
         ]
+
+    def test_write_true_rejects_existing_skill_by_frontmatter_name(self, tmp_path):
+        skill_dir = tmp_path / "legacy-dir"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: structured-skill\ndescription: Existing.\n---\n\n# Existing\n",
+            encoding="utf-8",
+        )
+
+        result = structured_skill_create_result(_valid_request(), skills_root=tmp_path, write=True)
+
+        assert result["status"] == "validation_error"
+        assert result["path"] == str(skill_dir / "SKILL.md")
+        assert result["validation"]["errors"][0]["code"] == "DUPLICATE_SKILL"
 
     def test_write_true_rejects_mixed_unsafe_paths_without_partial_skill_dir(self, tmp_path):
         request = _valid_request(

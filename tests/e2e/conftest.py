@@ -66,6 +66,7 @@ def _ensure_discord_mock():
     discord_mod.DMChannel = type("DMChannel", (), {})
     discord_mod.Thread = type("Thread", (), {})
     discord_mod.ForumChannel = type("ForumChannel", (), {})
+    discord_mod.Forbidden = type("Forbidden", (Exception,), {})
     discord_mod.Interaction = object
     discord_mod.app_commands = SimpleNamespace(
         describe=lambda **kwargs: (lambda fn: fn),
@@ -223,6 +224,9 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
     runner._capture_gateway_honcho_if_configured = lambda *a, **kw: None
     runner._emit_gateway_run_progress = AsyncMock()
 
+    # Disable destructive slash confirm gate so /new executes immediately
+    runner._read_user_config = lambda: {"approvals": {"destructive_slash_confirm": False}}
+
     runner.pairing_store = MagicMock()
     runner.pairing_store._is_rate_limited = MagicMock(return_value=False)
     runner.pairing_store.generate_code = MagicMock(return_value="ABC123")
@@ -322,11 +326,17 @@ def make_fake_guild(guild_id: int = GUILD_ID, name: str = "Test Server"):
     return SimpleNamespace(id=guild_id, name=name)
 
 
+async def _empty_discord_history(*_args, **_kwargs):
+    if False:  # pragma: no cover - makes this an async generator
+        yield None
+
+
 def make_fake_text_channel(channel_id: int = CHANNEL_ID, name: str = "general", guild=None):
     return SimpleNamespace(
         id=channel_id, name=name,
         guild=guild or make_fake_guild(),
         topic=None, type=0,
+        history=_empty_discord_history,
     )
 
 

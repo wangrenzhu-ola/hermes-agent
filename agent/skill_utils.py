@@ -24,7 +24,7 @@ PLATFORM_MAP = {
     "windows": "win32",
 }
 
-EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub", ".archive"))
+EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub", ".archive", ".pmo", ".qoder"))
 
 # ── Lazy YAML loader ─────────────────────────────────────────────────────
 
@@ -483,7 +483,8 @@ def normalize_skill_description(frontmatter: Dict[str, Any]) -> str:
 def iter_skill_index_files(skills_dir: Path, filename: str):
     """Walk skills_dir yielding sorted paths matching *filename*.
 
-    Excludes ``.git``, ``.github``, ``.hub``, ``.archive`` directories.
+    Excludes VCS/archive directories and nested runtime workspaces that can
+    contain copied skills.
     """
     matches = []
     for root, dirs, files in os.walk(skills_dir, followlinks=True):
