@@ -193,6 +193,33 @@ class TestMissingModelSection:
         assert not any("no 'model' section" in i.message for i in issues)
 
 
+class TestAdaptivePoolConfigValidation:
+    def test_adaptive_pool_strategy_and_policy_are_known_root_keys(self):
+        issues = validate_config_structure({
+            "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+            "pool_strategies": {"openai-codex": "adaptive"},
+            "pool_policies": {
+                "openai-codex": {
+                    "same_provider_failover_first": True,
+                    "max_transient_pool_failovers": 3,
+                    "transient_cooldown_seconds": 120,
+                    "quota_refresh_ttl_seconds": 300,
+                    "primary_hard_skip_percent": 98,
+                    "secondary_hard_skip_percent": 90,
+                    "secondary_soft_penalty_percent": 75,
+                    "circuit_breaker": {
+                        "max_fails": 3,
+                        "fail_timeout_seconds": 180,
+                        "half_open_probe_interval_seconds": 60,
+                    },
+                    "provider_fallback_after_pool_exhausted": True,
+                },
+            },
+        })
+
+        assert issues == []
+
+
 class TestConfigIssueDataclass:
     """ConfigIssue should be a proper dataclass."""
 

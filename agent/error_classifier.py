@@ -550,7 +550,11 @@ def classify_api_error(
     # alert text but the type isn't ssl.SSLError (happens with some SDKs
     # that re-raise without chaining).
     if any(p in error_msg for p in _SSL_TRANSIENT_PATTERNS):
-        return _result(FailoverReason.timeout, retryable=True)
+        return _result(
+            FailoverReason.timeout,
+            retryable=True,
+            should_rotate_credential=True,
+        )
 
     # ── 6. Server disconnect + large session → context overflow ─────
     # Must come BEFORE generic transport error catch — a disconnect on
@@ -572,12 +576,20 @@ def classify_api_error(
                 retryable=True,
                 should_compress=True,
             )
-        return _result(FailoverReason.timeout, retryable=True)
+        return _result(
+            FailoverReason.timeout,
+            retryable=True,
+            should_rotate_credential=True,
+        )
 
     # ── 7. Transport / timeout heuristics ───────────────────────────
 
     if error_type in _TRANSPORT_ERROR_TYPES or isinstance(error, (TimeoutError, ConnectionError, OSError)):
-        return _result(FailoverReason.timeout, retryable=True)
+        return _result(
+            FailoverReason.timeout,
+            retryable=True,
+            should_rotate_credential=True,
+        )
 
     # ── 8. Fallback: unknown ────────────────────────────────────────
 
@@ -688,11 +700,19 @@ def _classify_by_status(
             result_fn=result_fn,
         )
 
-    if status_code in {500, 502}:
-        return result_fn(FailoverReason.server_error, retryable=True)
+    if status_code in (500, 502):
+        return result_fn(
+            FailoverReason.server_error,
+            retryable=True,
+            should_rotate_credential=True,
+        )
 
-    if status_code in {503, 529}:
-        return result_fn(FailoverReason.overloaded, retryable=True)
+    if status_code in (503, 529):
+        return result_fn(
+            FailoverReason.overloaded,
+            retryable=True,
+            should_rotate_credential=True,
+        )
 
     # Other 4xx — non-retryable
     if 400 <= status_code < 500:
@@ -704,7 +724,11 @@ def _classify_by_status(
 
     # Other 5xx — retryable
     if 500 <= status_code < 600:
-        return result_fn(FailoverReason.server_error, retryable=True)
+        return result_fn(
+            FailoverReason.server_error,
+            retryable=True,
+            should_rotate_credential=True,
+        )
 
     return None
 

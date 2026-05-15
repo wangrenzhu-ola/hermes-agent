@@ -60,11 +60,13 @@ STRATEGY_FILL_FIRST = "fill_first"
 STRATEGY_ROUND_ROBIN = "round_robin"
 STRATEGY_RANDOM = "random"
 STRATEGY_LEAST_USED = "least_used"
+STRATEGY_ADAPTIVE = "adaptive"
 SUPPORTED_POOL_STRATEGIES = {
     STRATEGY_FILL_FIRST,
     STRATEGY_ROUND_ROBIN,
     STRATEGY_RANDOM,
     STRATEGY_LEAST_USED,
+    STRATEGY_ADAPTIVE,
 }
 
 # Cooldown before retrying an exhausted credential.
@@ -85,8 +87,28 @@ CUSTOM_POOL_PREFIX = "custom:"
 _EXTRA_KEYS = frozenset({
     "token_type", "scope", "client_id", "portal_base_url", "obtained_at",
     "expires_in", "agent_key_id", "agent_key_expires_in", "agent_key_reused",
-    "agent_key_obtained_at", "tls",
+    "agent_key_obtained_at", "tls", "quota",
 })
+
+
+@dataclass(frozen=True)
+class AdaptiveCircuitBreakerPolicy:
+    max_fails: int = 3
+    fail_timeout_seconds: int = 180
+    half_open_probe_interval_seconds: int = 60
+
+
+@dataclass(frozen=True)
+class AdaptivePoolPolicy:
+    same_provider_failover_first: bool = False
+    max_transient_pool_failovers: int = 3
+    transient_cooldown_seconds: int = 120
+    quota_refresh_ttl_seconds: int = 300
+    primary_hard_skip_percent: float = 98.0
+    secondary_hard_skip_percent: float = 90.0
+    secondary_soft_penalty_percent: float = 75.0
+    provider_fallback_after_pool_exhausted: bool = True
+    circuit_breaker: AdaptiveCircuitBreakerPolicy = AdaptiveCircuitBreakerPolicy()
 
 
 @dataclass
@@ -367,7 +389,9 @@ def get_pool_strategy(provider: str) -> str:
     if config is None:
         return STRATEGY_FILL_FIRST
 
-    strategies = config.get("credential_pool_strategies")
+    strategies = config.get("pool_strategies")
+    if not isinstance(strategies, dict) or provider not in strategies:
+        strategies = config.get("credential_pool_strategies")
     if not isinstance(strategies, dict):
         return STRATEGY_FILL_FIRST
 
@@ -375,6 +399,105 @@ def get_pool_strategy(provider: str) -> str:
     if strategy in SUPPORTED_POOL_STRATEGIES:
         return strategy
     return STRATEGY_FILL_FIRST
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _coerce_int(value: Any, default: int, *, minimum: int = 0) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, coerced)
+
+
+def _coerce_float(value: Any, default: float, *, minimum: float = 0.0, maximum: float = 100.0) -> float:
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        return default
+    return min(maximum, max(minimum, coerced))
+
+
+def get_pool_policy(provider: str) -> AdaptivePoolPolicy:
+    """Return adaptive routing policy for a provider.
+
+    ``pool_policies`` is the issue-facing config surface.  Missing fields keep
+    conservative defaults; an adaptive strategy opts into same-provider
+    failover-first behavior even when the policy block omits that boolean.
+    """
+    strategy = get_pool_strategy(provider)
+    defaults = AdaptivePoolPolicy(
+        same_provider_failover_first=(strategy == STRATEGY_ADAPTIVE),
+    )
+    config = _load_config_safe() or {}
+    policies = config.get("pool_policies")
+    raw = policies.get(provider) if isinstance(policies, dict) else None
+    if not isinstance(raw, dict):
+        return defaults
+
+    breaker_raw = raw.get("circuit_breaker")
+    breaker = defaults.circuit_breaker
+    if isinstance(breaker_raw, dict):
+        breaker = AdaptiveCircuitBreakerPolicy(
+            max_fails=_coerce_int(breaker_raw.get("max_fails"), breaker.max_fails, minimum=1),
+            fail_timeout_seconds=_coerce_int(
+                breaker_raw.get("fail_timeout_seconds"),
+                breaker.fail_timeout_seconds,
+                minimum=1,
+            ),
+            half_open_probe_interval_seconds=_coerce_int(
+                breaker_raw.get("half_open_probe_interval_seconds"),
+                breaker.half_open_probe_interval_seconds,
+                minimum=1,
+            ),
+        )
+
+    return AdaptivePoolPolicy(
+        same_provider_failover_first=_coerce_bool(
+            raw.get("same_provider_failover_first"),
+            defaults.same_provider_failover_first,
+        ),
+        max_transient_pool_failovers=_coerce_int(
+            raw.get("max_transient_pool_failovers"),
+            defaults.max_transient_pool_failovers,
+        ),
+        transient_cooldown_seconds=_coerce_int(
+            raw.get("transient_cooldown_seconds"),
+            defaults.transient_cooldown_seconds,
+        ),
+        quota_refresh_ttl_seconds=_coerce_int(
+            raw.get("quota_refresh_ttl_seconds"),
+            defaults.quota_refresh_ttl_seconds,
+        ),
+        primary_hard_skip_percent=_coerce_float(
+            raw.get("primary_hard_skip_percent"),
+            defaults.primary_hard_skip_percent,
+        ),
+        secondary_hard_skip_percent=_coerce_float(
+            raw.get("secondary_hard_skip_percent"),
+            defaults.secondary_hard_skip_percent,
+        ),
+        secondary_soft_penalty_percent=_coerce_float(
+            raw.get("secondary_soft_penalty_percent"),
+            defaults.secondary_soft_penalty_percent,
+        ),
+        provider_fallback_after_pool_exhausted=_coerce_bool(
+            raw.get("provider_fallback_after_pool_exhausted"),
+            defaults.provider_fallback_after_pool_exhausted,
+        ),
+        circuit_breaker=breaker,
+    )
 
 
 DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL = 1
@@ -386,6 +509,7 @@ class CredentialPool:
         self._entries = sorted(entries, key=lambda entry: entry.priority)
         self._current_id: Optional[str] = None
         self._strategy = get_pool_strategy(provider)
+        self._policy = get_pool_policy(provider)
         self._lock = threading.Lock()
         self._active_leases: Dict[str, int] = {}
         self._max_concurrent = DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL
@@ -396,6 +520,24 @@ class CredentialPool:
     def has_available(self) -> bool:
         """True if at least one entry is not currently in exhaustion cooldown."""
         return bool(self._available_entries())
+
+    def same_provider_failover_first(self) -> bool:
+        return self._policy.same_provider_failover_first
+
+    def max_transient_pool_failovers(self) -> int:
+        return self._policy.max_transient_pool_failovers
+
+    def transient_cooldown_seconds(self) -> int:
+        return self._policy.transient_cooldown_seconds
+
+    def provider_fallback_after_pool_exhausted(self) -> bool:
+        return self._policy.provider_fallback_after_pool_exhausted
+
+    def available_count(self) -> int:
+        return len(self._available_entries())
+
+    def entry_count(self) -> int:
+        return len(self._entries)
 
     def entries(self) -> List[PooledCredential]:
         return list(self._entries)
@@ -910,12 +1052,167 @@ class CredentialPool:
             self._persist()
         return available
 
+    def _adaptive_circuit_state(self, now: Optional[float] = None) -> str:
+        """Return closed/open/half_open for the derived provider-group breaker."""
+        if self._strategy != STRATEGY_ADAPTIVE:
+            return "closed"
+        now = time.time() if now is None else now
+        breaker = self._policy.circuit_breaker
+        recent_failures = [
+            entry
+            for entry in self._entries
+            if entry.last_status == STATUS_EXHAUSTED
+            and entry.last_status_at
+            and now - entry.last_status_at <= breaker.fail_timeout_seconds
+        ]
+        if len(recent_failures) < breaker.max_fails:
+            return "closed"
+        last_failure_at = max(entry.last_status_at or 0 for entry in recent_failures)
+        if now - last_failure_at >= breaker.half_open_probe_interval_seconds:
+            logger.info(
+                "credential pool adaptive: circuit half-open for provider=%s after %d recent failures",
+                self.provider,
+                len(recent_failures),
+            )
+            return "half_open"
+        logger.warning(
+            "credential pool adaptive: circuit open for provider=%s recent_failures=%d max_fails=%d",
+            self.provider,
+            len(recent_failures),
+            breaker.max_fails,
+        )
+        return "open"
+
+    def _quota_snapshot(self, entry: PooledCredential) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        quota = entry.extra.get("quota") if isinstance(entry.extra, dict) else None
+        if not isinstance(quota, dict):
+            return None, None, None
+        primary = quota.get("primary_percent")
+        secondary = quota.get("secondary_percent")
+        observed_at = _parse_absolute_timestamp(quota.get("observed_at"))
+        try:
+            primary_percent = float(primary) if primary is not None else None
+        except (TypeError, ValueError):
+            primary_percent = None
+        try:
+            secondary_percent = float(secondary) if secondary is not None else None
+        except (TypeError, ValueError):
+            secondary_percent = None
+        return primary_percent, secondary_percent, observed_at
+
+    def _adaptive_score(self, entry: PooledCredential, now: float) -> Optional[Tuple[float, int, int]]:
+        policy = self._policy
+        primary_percent, secondary_percent, observed_at = self._quota_snapshot(entry)
+        quota_age = now - observed_at if observed_at is not None else None
+        quota_fresh = quota_age is not None and quota_age <= policy.quota_refresh_ttl_seconds
+
+        if primary_percent is None and secondary_percent is None:
+            if self.provider == "openai-codex":
+                logger.warning(
+                    "credential pool adaptive: provider=%s seat=%s decision=quota_unavailable",
+                    self.provider,
+                    entry.id,
+                )
+        elif not quota_fresh:
+            logger.warning(
+                "credential pool adaptive: provider=%s seat=%s decision=quota_stale quota_age_seconds=%s",
+                self.provider,
+                entry.id,
+                int(quota_age) if quota_age is not None else "unknown",
+            )
+        else:
+            if primary_percent is not None and primary_percent >= policy.primary_hard_skip_percent:
+                logger.info(
+                    "credential pool adaptive: provider=%s seat=%s primary_percent=%.1f threshold=%.1f decision=hard_skipped",
+                    self.provider,
+                    entry.id,
+                    primary_percent,
+                    policy.primary_hard_skip_percent,
+                )
+                return None
+            if secondary_percent is not None and secondary_percent >= policy.secondary_hard_skip_percent:
+                logger.info(
+                    "credential pool adaptive: provider=%s seat=%s secondary_percent=%.1f threshold=%.1f decision=hard_skipped",
+                    self.provider,
+                    entry.id,
+                    secondary_percent,
+                    policy.secondary_hard_skip_percent,
+                )
+                return None
+
+        soft_penalty = 0.0
+        if (
+            quota_fresh
+            and secondary_percent is not None
+            and secondary_percent >= policy.secondary_soft_penalty_percent
+        ):
+            soft_penalty = 100.0 + secondary_percent
+            logger.info(
+                "credential pool adaptive: provider=%s seat=%s secondary_percent=%.1f threshold=%.1f decision=soft_penalized",
+                self.provider,
+                entry.id,
+                secondary_percent,
+                policy.secondary_soft_penalty_percent,
+            )
+
+        recent_failure_penalty = 0.0
+        if entry.last_status_at and now - entry.last_status_at <= policy.circuit_breaker.fail_timeout_seconds:
+            recent_failure_penalty = 10.0
+
+        lease_penalty = float(self._active_leases.get(entry.id, 0) * 1000)
+        score = (
+            lease_penalty
+            + soft_penalty
+            + recent_failure_penalty
+            + float(entry.request_count)
+            + float(entry.priority) / 1000.0
+        )
+        return score, entry.priority, entry.request_count
+
+    def _select_adaptive_unlocked(self, available: List[PooledCredential]) -> Optional[PooledCredential]:
+        now = time.time()
+        circuit_state = self._adaptive_circuit_state(now)
+        if circuit_state == "open":
+            self._current_id = None
+            return None
+        if circuit_state == "half_open":
+            available = available[:1]
+
+        scored: List[Tuple[Tuple[float, int, int], PooledCredential]] = []
+        for entry in available:
+            score = self._adaptive_score(entry, now)
+            if score is not None:
+                scored.append((score, entry))
+        if not scored:
+            self._current_id = None
+            logger.warning(
+                "credential pool adaptive: provider=%s no selectable entries after policy filtering",
+                self.provider,
+            )
+            return None
+
+        _, entry = min(scored, key=lambda item: item[0])
+        updated = replace(entry, request_count=entry.request_count + 1)
+        self._replace_entry(entry, updated)
+        self._current_id = updated.id
+        logger.info(
+            "credential pool adaptive: provider=%s seat=%s decision=selected active_leases=%d request_count=%d",
+            self.provider,
+            updated.id,
+            self._active_leases.get(updated.id, 0),
+            updated.request_count,
+        )
+        return updated
+
     def _select_unlocked(self) -> Optional[PooledCredential]:
         available = self._available_entries(clear_expired=True, refresh=True)
         if not available:
             self._current_id = None
             logger.info("credential pool: no available entries (all exhausted or empty)")
             return None
+
+        if self._strategy == STRATEGY_ADAPTIVE:
+            return self._select_adaptive_unlocked(available)
 
         if self._strategy == STRATEGY_RANDOM:
             entry = random.choice(available)

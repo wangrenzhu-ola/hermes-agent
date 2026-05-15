@@ -3691,6 +3691,98 @@ class TestCredentialPoolRecovery:
         assert retry_same is False
         agent._swap_credential.assert_called_once_with(next_entry)
 
+    def test_recover_with_pool_rotates_first_429_when_policy_enabled(self, agent):
+        next_entry = SimpleNamespace(label="secondary", id="cred-2")
+
+        class _Pool:
+            provider = "openai-codex"
+
+            def same_provider_failover_first(self):
+                return True
+
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None):
+                assert status_code == 429
+                assert error_context == {"reason": "quota"}
+                return next_entry
+
+        agent._credential_pool = _Pool()
+        agent._swap_credential = MagicMock()
+
+        recovered, retry_same = agent._recover_with_credential_pool(
+            status_code=429,
+            has_retried_429=False,
+            classified_reason=FailoverReason.rate_limit,
+            error_context={"reason": "quota"},
+        )
+
+        assert recovered is True
+        assert retry_same is False
+        agent._swap_credential.assert_called_once_with(next_entry)
+
+    def test_recover_with_pool_rotates_transient_errors_before_fallback(self, agent):
+        next_entry = SimpleNamespace(label="secondary", id="cred-2")
+        calls = []
+
+        class _Pool:
+            provider = "openai-codex"
+
+            def same_provider_failover_first(self):
+                return True
+
+            def max_transient_pool_failovers(self):
+                return 2
+
+            def transient_cooldown_seconds(self):
+                return 30
+
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None):
+                calls.append((status_code, error_context))
+                return next_entry
+
+        agent._credential_pool = _Pool()
+        agent._swap_credential = MagicMock()
+
+        recovered, retry_same = agent._recover_with_credential_pool(
+            status_code=503,
+            has_retried_429=False,
+            classified_reason=FailoverReason.overloaded,
+            error_context={"message": "overloaded"},
+        )
+
+        assert recovered is True
+        assert retry_same is False
+        assert agent._transient_pool_failover_count == 1
+        assert calls[0][0] == 503
+        assert calls[0][1]["reason"] == "overloaded"
+        assert calls[0][1]["reset_at"] > 0
+        agent._swap_credential.assert_called_once_with(next_entry)
+
+    def test_recover_with_pool_stops_transient_rotation_at_policy_limit(self, agent):
+        class _Pool:
+            provider = "openai-codex"
+
+            def same_provider_failover_first(self):
+                return True
+
+            def max_transient_pool_failovers(self):
+                return 1
+
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None):
+                raise AssertionError("should not rotate after limit")
+
+        agent._credential_pool = _Pool()
+        agent._swap_credential = MagicMock()
+        agent._transient_pool_failover_count = 1
+
+        recovered, retry_same = agent._recover_with_credential_pool(
+            status_code=500,
+            has_retried_429=False,
+            classified_reason=FailoverReason.server_error,
+        )
+
+        assert recovered is False
+        assert retry_same is False
+        agent._swap_credential.assert_not_called()
 
     def test_recover_with_pool_refreshes_on_401(self, agent):
         """401 with successful refresh should swap to refreshed credential."""

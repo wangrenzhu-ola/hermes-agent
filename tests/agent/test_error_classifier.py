@@ -1223,6 +1223,45 @@ class TestSSLTransientPatterns:
         assert result.reason == FailoverReason.timeout
         assert result.retryable is True
 
+    def test_transient_errors_request_same_provider_rotation(self):
+        transient_cases = [
+            MockAPIError("server down", status_code=500, body={"error": {"message": "server down"}}),
+            MockAPIError("bad gateway", status_code=502, body={"error": {"message": "bad gateway"}}),
+            MockAPIError("overloaded", status_code=503, body={"error": {"message": "overloaded"}}),
+            MockAPIError("overloaded", status_code=529, body={"error": {"message": "overloaded"}}),
+            TimeoutError("timed out"),
+            ConnectError("connection failed"),
+        ]
+
+        for err in transient_cases:
+            result = classify_api_error(err, provider="openai-codex")
+            assert result.reason in {
+                FailoverReason.timeout,
+                FailoverReason.server_error,
+                FailoverReason.overloaded,
+            }
+            assert result.should_rotate_credential is True
+
+    def test_context_overflow_and_bad_request_do_not_rotate_credentials(self):
+        context = MockAPIError(
+            "context length exceeded",
+            status_code=400,
+            body={"error": {"message": "context length exceeded"}},
+        )
+        bad_request = MockAPIError(
+            "invalid request",
+            status_code=400,
+            body={"error": {"message": "invalid request"}},
+        )
+
+        context_result = classify_api_error(context, provider="openai-codex")
+        bad_request_result = classify_api_error(bad_request, provider="openai-codex")
+
+        assert context_result.reason == FailoverReason.context_overflow
+        assert context_result.should_rotate_credential is False
+        assert bad_request_result.reason == FailoverReason.format_error
+        assert bad_request_result.should_rotate_credential is False
+
 # ── Test: RateLimitError without status_code (Copilot/GitHub Models) ──────────
 
 class TestRateLimitErrorWithoutStatusCode:
