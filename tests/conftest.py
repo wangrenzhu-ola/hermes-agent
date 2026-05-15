@@ -272,6 +272,15 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "WECOM_HOME_CHANNEL",
     "WECOM_HOME_CHANNEL_THREAD_ID",
     "WECOM_HOME_CHANNEL_NAME",
+    "WEIXIN_HOME_CHANNEL",
+    "WEIXIN_HOME_CHANNEL_THREAD_ID",
+    "WEIXIN_HOME_CHANNEL_NAME",
+    "QQ_HOME_CHANNEL",
+    "QQ_HOME_CHANNEL_THREAD_ID",
+    "QQ_HOME_CHANNEL_NAME",
+    "QQBOT_HOME_CHANNEL",
+    "QQBOT_HOME_CHANNEL_THREAD_ID",
+    "QQBOT_HOME_CHANNEL_NAME",
     # Platform gating — set by load_gateway_config() as a side effect when
     # a config.yaml is present, so individual test bodies that call the
     # loader leak these values into later tests on the same xdist worker.
@@ -483,6 +492,8 @@ def _reset_module_state():
         from agent import auxiliary_client as _aux_mod
         _aux_mod.clear_runtime_main()
         _aux_mod._reset_aux_unhealthy_cache()
+        with _aux_mod._client_cache_lock:
+            _aux_mod._client_cache.clear()
     except Exception:
         pass
 

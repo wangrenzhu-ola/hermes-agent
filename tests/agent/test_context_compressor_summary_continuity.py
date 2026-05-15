@@ -31,6 +31,8 @@ def _messages_with_handoff(summary_body: str):
         {"role": "assistant", "content": "new assistant work after resume"},
         {"role": "user", "content": "more new work after resume"},
         {"role": "assistant", "content": "latest tail response"},
+        {"role": "user", "content": "final active user request after resume"},
+        {"role": "assistant", "content": "final active assistant response"},
     ]
 
 
