@@ -259,7 +259,7 @@ TIPS = [
     "hermes acp runs Hermes as an ACP server for VS Code, Zed, and JetBrains integration.",
     "Custom providers: save named endpoints in config.yaml under custom_providers.",
     "HERMES_EPHEMERAL_SYSTEM_PROMPT injects a system prompt that's never persisted to history.",
-    "credential_pool_strategies supports fill_first, round_robin, least_used, and random rotation.",
+    "pool_strategies supports fill_first, round_robin, least_used, random, and adaptive credential routing.",
     "hermes login supports OAuth-based auth for Nous and OpenAI Codex providers.",
     "The API server supports both Chat Completions and Responses API with server-side state.",
     "tool_preview_length: 0 in config shows full file paths in the spinner's activity feed.",
@@ -367,7 +367,7 @@ TIPS = [
 
     # --- Credential Pools & Routing ---
     'hermes auth reset <provider> clears all cooldowns and exhaustion flags on a credential pool.',
-    'credential_pool_strategies.<provider>: round_robin cycles keys evenly instead of the fill_first default.',
+    'pool_strategies.<provider>: adaptive ranks seats by quota, cooldown, failures, and active leases.',
     'use_gateway: true per-tool routes web, image, tts, or browser through your Nous subscription — no extra keys.',
     'provider_routing.data_collection: deny excludes data-storing providers on OpenRouter.',
     'provider_routing.require_parameters: true only routes to providers that support every param in your request.',
@@ -483,5 +483,3 @@ def get_random_tip(exclude_recent: int = 0) -> str:
             deduplication across sessions.
     """
     return random.choice(TIPS)
-
-
