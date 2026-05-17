@@ -616,6 +616,101 @@ class TestGoalManagerSubgoals:
         assert mgr2.state.subgoals == ["first", "second"]
 
 
+class TestGcwGoalBinding:
+    def test_set_gcw_supervisor_persists_machine_readable_binding(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="gcw-bind")
+        state = mgr.set_gcw_supervisor(
+            issue_url="https://github.com/acme/repo/issues/123",
+            goal="Continue GCW until closeout",
+            run_id="gcw-acme-123",
+            phase="gh:work",
+            source_repo="acme/repo",
+        )
+
+        assert state.gcw_binding["issue_url"] == "https://github.com/acme/repo/issues/123"
+        assert state.gcw_binding["run_id"] == "gcw-acme-123"
+        assert state.gcw_binding["goal_id"] == "gcw-bind"
+        assert state.gcw_binding["phase"] == "gh:work"
+        assert state.gcw_binding["source_repo"] == "acme/repo"
+        assert state.gcw_binding["terminal_candidate"] == "continue"
+        assert state.gcw_binding["resume_readback_required"] is True
+
+        reloaded = GoalManager(session_id="gcw-bind")
+        assert reloaded.state.gcw_binding == state.gcw_binding
+        assert "GCW" in reloaded.status_line()
+        assert "#123" in reloaded.status_line()
+
+    def test_gcw_supervisor_rejects_missing_issue_url(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="gcw-no-url")
+        with pytest.raises(ValueError, match="issue URL"):
+            mgr.set_gcw_supervisor(goal="Continue GCW without a URL")
+
+    def test_gcw_resume_requires_first_turn_readback(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="gcw-resume")
+        mgr.set_gcw_supervisor(
+            issue_url="https://github.com/acme/repo/issues/456",
+            run_id="run-456",
+            phase="gh:debug",
+        )
+        mgr.pause()
+        mgr.resume()
+
+        prompt = mgr.next_continuation_prompt()
+        assert prompt is not None
+        assert "GCW supervisor binding" in prompt
+        assert "https://github.com/acme/repo/issues/456" in prompt
+        assert "run-456" in prompt
+        assert "First action after resume: read back" in prompt
+        assert "status.json" in prompt
+        assert "ledger-updates.jsonl" in prompt
+
+    def test_subgoal_default_is_soft_candidate_not_formal_gate(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="gcw-subgoal-soft")
+        mgr.set_gcw_supervisor(issue_url="https://github.com/acme/repo/issues/789")
+        mgr.add_subgoal("must include active smoke evidence")
+
+        prompt = mgr.next_continuation_prompt()
+        assert prompt is not None
+        assert "judge-visible GCW candidate gates" in prompt
+        assert "must include active smoke evidence" in prompt
+        assert "not yet formal validator gates" in prompt
+        assert mgr.state.gcw_binding.get("formal_gates") == []
+
+    def test_promote_subgoal_requires_owner_issue_ledger_and_readback_evidence(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="gcw-promote")
+        mgr.set_gcw_supervisor(issue_url="https://github.com/acme/repo/issues/789")
+        mgr.add_subgoal("must include active smoke evidence")
+
+        with pytest.raises(ValueError, match="owner_evidence"):
+            mgr.promote_subgoal_to_gcw_gate(
+                1,
+                issue_comment="https://github.com/acme/repo/issues/789#issuecomment-1",
+                ledger_event="ledger line 1",
+                readback="readback ok",
+            )
+
+        gate = mgr.promote_subgoal_to_gcw_gate(
+            1,
+            owner_evidence="PMO approved in issue comment",
+            issue_comment="https://github.com/acme/repo/issues/789#issuecomment-1",
+            ledger_event="formal_gate_promoted",
+            readback="read back status/ledger after promotion",
+        )
+        assert gate["text"] == "must include active smoke evidence"
+        assert gate["owner_evidence"]
+        assert mgr.state.gcw_binding["formal_gates"] == [gate]
+
+
 class TestContinuationPromptWithSubgoals:
     def test_empty_subgoals_uses_original_template(self, hermes_home):
         from hermes_cli.goals import GoalManager
