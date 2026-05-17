@@ -9675,6 +9675,32 @@ class GatewayRunner:
         if not args or lower == "status":
             return mgr.status_line()
 
+        if lower.startswith("gcw ") or lower == "gcw":
+            gcw_arg = args[3:].strip()
+            try:
+                pieces = gcw_arg.split(None, 1)
+                issue_url = pieces[0] if pieces else ""
+                goal_text = pieces[1] if len(pieces) > 1 else None
+                state = mgr.set_gcw_supervisor(issue_url=issue_url, goal=goal_text)
+            except ValueError as exc:
+                return f"Invalid GCW goal: {exc}\nUsage: /goal gcw https://github.com/<owner>/<repo>/issues/<n> [goal text]"
+
+            adapter = self.adapters.get(event.source.platform) if event.source else None
+            _quick_key = self._session_key_for_source(event.source) if event.source else None
+            if adapter and _quick_key:
+                try:
+                    kickoff_event = MessageEvent(
+                        text=state.goal,
+                        message_type=MessageType.TEXT,
+                        source=event.source,
+                        message_id=event.message_id,
+                        channel_prompt=event.channel_prompt,
+                    )
+                    self._enqueue_fifo(_quick_key, kickoff_event, adapter)
+                except Exception as exc:
+                    logger.debug("goal gcw kickoff enqueue failed: %s", exc)
+            return f"⊙ GCW supervisor goal set ({state.max_turns}-turn budget): {state.goal}\nBound to {state.gcw_binding.get('issue_url')}; resume starts with status/ledger readback."
+
         if lower == "pause":
             state = mgr.pause(reason="user-paused")
             if state is None:
@@ -9774,6 +9800,32 @@ class GatewayRunner:
             if prev:
                 return f"✓ Cleared {prev} subgoal{'s' if prev != 1 else ''}."
             return "No subgoals to clear."
+
+        if verb == "promote":
+            parts2 = rest.split(None, 1)
+            if len(parts2) < 2:
+                return "Usage: /subgoal promote <n> owner=<evidence> comment=<url> ledger=<event> readback=<summary>"
+            try:
+                idx = int(parts2[0])
+            except ValueError:
+                return "/subgoal promote: <n> must be an integer (1-based index)."
+            import shlex
+            kv = {}
+            for token in shlex.split(parts2[1]):
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    kv[k.strip().lower()] = v.strip()
+            try:
+                gate = mgr.promote_subgoal_to_gcw_gate(
+                    idx,
+                    owner_evidence=kv.get("owner") or kv.get("owner_evidence"),
+                    issue_comment=kv.get("comment") or kv.get("issue_comment"),
+                    ledger_event=kv.get("ledger") or kv.get("ledger_event"),
+                    readback=kv.get("readback"),
+                )
+            except (ValueError, RuntimeError, IndexError) as exc:
+                return f"/subgoal promote: {exc}"
+            return f"✓ Promoted subgoal {idx} to GCW formal gate: {gate['text']}"
 
         try:
             text = mgr.add_subgoal(args)

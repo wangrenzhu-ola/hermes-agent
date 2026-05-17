@@ -194,6 +194,10 @@ class GoalState:
     # them into the verdict. Backwards-compatible: defaults to empty so
     # old state_meta rows load unchanged.
     subgoals: List[str] = field(default_factory=list)
+    # Machine-readable GCW supervisor binding. Empty for ordinary goals.
+    # When present, it binds /goal continuation to a canonical issue/run
+    # and records evidence/gate state without making /goal the closeout authority.
+    gcw_binding: Dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -205,6 +209,8 @@ class GoalState:
         subgoals: List[str] = []
         if isinstance(raw_subgoals, list):
             subgoals = [str(s).strip() for s in raw_subgoals if str(s).strip()]
+        raw_binding = data.get("gcw_binding") or {}
+        gcw_binding: Dict[str, Any] = raw_binding if isinstance(raw_binding, dict) else {}
         return cls(
             goal=data.get("goal", ""),
             status=data.get("status", "active"),
@@ -217,6 +223,7 @@ class GoalState:
             paused_reason=data.get("paused_reason"),
             consecutive_parse_failures=int(data.get("consecutive_parse_failures", 0) or 0),
             subgoals=subgoals,
+            gcw_binding=gcw_binding,
         )
 
     # --- subgoals helpers -------------------------------------------------
@@ -332,6 +339,76 @@ _GCW_GOAL_RE = re.compile(
     r"phase report|handoff|completion guard|github\.com/.+/issues/\d+)",
     re.IGNORECASE,
 )
+
+_ISSUE_URL_RE = re.compile(
+    r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_issue_url(text: str) -> Optional[str]:
+    match = _ISSUE_URL_RE.search(text or "")
+    return match.group(0) if match else None
+
+
+def _issue_ref(issue_url: str) -> str:
+    match = _ISSUE_URL_RE.search(issue_url or "")
+    return f"#{match.group('number')}" if match else issue_url
+
+
+def _source_repo_from_issue_url(issue_url: str) -> str:
+    match = _ISSUE_URL_RE.search(issue_url or "")
+    if not match:
+        return ""
+    return f"{match.group('owner')}/{match.group('repo')}"
+
+
+def _new_gcw_binding(
+    *,
+    issue_url: str,
+    goal_id: str,
+    run_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    source_repo: Optional[str] = None,
+) -> Dict[str, Any]:
+    issue_url = (issue_url or "").strip()
+    if not _ISSUE_URL_RE.search(issue_url):
+        raise ValueError("GCW supervisor requires a canonical GitHub issue URL")
+    return {
+        "schema_version": "gcw-goal-binding.v1",
+        "issue_url": issue_url,
+        "run_id": (run_id or "").strip(),
+        "goal_id": goal_id,
+        "phase": (phase or "readback").strip(),
+        "source_repo": (source_repo or _source_repo_from_issue_url(issue_url)).strip(),
+        "terminal_candidate": "continue",
+        "evidence_refs": [],
+        "missing_gates": ["status_readback", "ledger_readback", "validator_closeout"],
+        "formal_gates": [],
+        "resume_readback_required": True,
+    }
+
+
+def _binding_summary(binding: Dict[str, Any]) -> str:
+    if not binding:
+        return ""
+    missing = binding.get("missing_gates") or []
+    formal_gates = binding.get("formal_gates") or []
+    return (
+        "\n\nGCW supervisor binding:\n"
+        f"- issue_url: {binding.get('issue_url') or ''}\n"
+        f"- run_id: {binding.get('run_id') or '(unknown — read back before continuing)'}\n"
+        f"- goal_id: {binding.get('goal_id') or ''}\n"
+        f"- source_repo: {binding.get('source_repo') or ''}\n"
+        f"- current_phase: {binding.get('phase') or 'readback'}\n"
+        f"- terminal_candidate: {binding.get('terminal_candidate') or 'continue'}\n"
+        f"- missing_gates: {', '.join(str(x) for x in missing) if missing else '(none recorded)'}\n"
+        f"- formal_gates: {len(formal_gates)} promoted gate(s) with owner/issue/ledger/readback evidence\n"
+        "First action after resume: read back Issue, status.json, "
+        "ledger-updates.jsonl, phase report/handoff, worker/process state, "
+        "validator/completion guard/closeout evidence, and missing gates "
+        "before launching new work or reporting progress."
+    )
 
 
 def _is_gcw_bound_goal(goal: str, subgoals: Optional[List[str]] = None) -> bool:
@@ -555,13 +632,19 @@ class GoalManager:
             return "No active goal. Set one with /goal <text>."
         turns = f"{s.turns_used}/{s.max_turns} turns"
         sub = f", {len(s.subgoals)} subgoal{'s' if len(s.subgoals) != 1 else ''}" if s.subgoals else ""
+        gcw = ""
+        if s.gcw_binding:
+            ref = _issue_ref(str(s.gcw_binding.get("issue_url") or ""))
+            phase = s.gcw_binding.get("phase") or "readback"
+            terminal = s.gcw_binding.get("terminal_candidate") or "continue"
+            gcw = f", GCW {ref} phase={phase} terminal={terminal}"
         if s.status == "active":
-            return f"⊙ Goal (active, {turns}{sub}): {s.goal}"
+            return f"⊙ Goal (active, {turns}{sub}{gcw}): {s.goal}"
         if s.status == "paused":
             extra = f" — {s.paused_reason}" if s.paused_reason else ""
-            return f"⏸ Goal (paused, {turns}{sub}{extra}): {s.goal}"
+            return f"⏸ Goal (paused, {turns}{sub}{gcw}{extra}): {s.goal}"
         if s.status == "done":
-            return f"✓ Goal done ({turns}{sub}): {s.goal}"
+            return f"✓ Goal done ({turns}{sub}{gcw}): {s.goal}"
         return f"Goal ({s.status}, {turns}{sub}): {s.goal}"
 
     # --- mutation -----------------------------------------------------
@@ -582,6 +665,74 @@ class GoalManager:
         save_goal(self.session_id, state)
         return state
 
+    def set_gcw_supervisor(
+        self,
+        *,
+        issue_url: Optional[str] = None,
+        goal: Optional[str] = None,
+        run_id: Optional[str] = None,
+        phase: Optional[str] = None,
+        source_repo: Optional[str] = None,
+        max_turns: Optional[int] = None,
+    ) -> GoalState:
+        """Start an issue-bound GCW supervisor goal.
+
+        This is the machine-readable bridge for GCW integrations: it keeps
+        ordinary /goal free-form, while GCW work is explicitly bound to a
+        canonical Issue/run and always resumes through a status/ledger
+        readback turn before executing more work.
+        """
+        issue_url = (issue_url or _extract_issue_url(goal or "") or "").strip()
+        if not issue_url:
+            raise ValueError("GCW supervisor requires a canonical GitHub issue URL")
+        if not goal:
+            goal = f"Continue GCW supervisor for {issue_url} until terminal closeout evidence is reached"
+        state = self.set(goal, max_turns=max_turns)
+        state.gcw_binding = _new_gcw_binding(
+            issue_url=issue_url,
+            goal_id=self.session_id,
+            run_id=run_id,
+            phase=phase,
+            source_repo=source_repo,
+        )
+        save_goal(self.session_id, state)
+        return state
+
+    def bind_gcw_supervisor(
+        self,
+        *,
+        issue_url: str,
+        run_id: Optional[str] = None,
+        phase: Optional[str] = None,
+        source_repo: Optional[str] = None,
+    ) -> GoalState:
+        """Bind an existing active/paused goal to a GCW issue/run."""
+        if not self._state or not self.has_goal():
+            raise RuntimeError("no active goal")
+        self._state.gcw_binding = _new_gcw_binding(
+            issue_url=issue_url,
+            goal_id=self.session_id,
+            run_id=run_id,
+            phase=phase,
+            source_repo=source_repo,
+        )
+        save_goal(self.session_id, self._state)
+        return self._state
+
+    def update_gcw_binding(self, **updates: Any) -> Optional[GoalState]:
+        """Update machine-readable GCW readback fields without clearing history."""
+        if not self._state or not self._state.gcw_binding:
+            return None
+        allowed = {
+            "run_id", "phase", "terminal_candidate", "evidence_refs",
+            "missing_gates", "resume_readback_required", "source_repo",
+        }
+        for key, value in updates.items():
+            if key in allowed:
+                self._state.gcw_binding[key] = value
+        save_goal(self.session_id, self._state)
+        return self._state
+
     def pause(self, reason: str = "user-paused") -> Optional[GoalState]:
         if not self._state:
             return None
@@ -597,6 +748,8 @@ class GoalManager:
         self._state.paused_reason = None
         if reset_budget:
             self._state.turns_used = 0
+        if self._state.gcw_binding:
+            self._state.gcw_binding["resume_readback_required"] = True
         save_goal(self.session_id, self._state)
         return self._state
 
@@ -629,8 +782,54 @@ class GoalManager:
         if not text:
             raise ValueError("subgoal text is empty")
         self._state.subgoals.append(text)
+        if self._state.gcw_binding:
+            self._state.gcw_binding.setdefault("formal_gates", [])
         save_goal(self.session_id, self._state)
         return text
+
+    def promote_subgoal_to_gcw_gate(
+        self,
+        index_1based: int,
+        *,
+        owner_evidence: Optional[str] = None,
+        issue_comment: Optional[str] = None,
+        ledger_event: Optional[str] = None,
+        readback: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Explicitly promote a /subgoal into a formal GCW gate.
+
+        Promotion is intentionally strict: all evidence channels must be
+        present so a chat-only /subgoal cannot silently mutate validator/AC
+        gates. The returned dict is stored under gcw_binding.formal_gates for
+        GCW PMO/validator readback.
+        """
+        if self._state is None or not self.has_goal():
+            raise RuntimeError("no active goal")
+        if not self._state.gcw_binding:
+            raise RuntimeError("goal is not GCW-bound")
+        idx = int(index_1based) - 1
+        if idx < 0 or idx >= len(self._state.subgoals):
+            raise IndexError(f"index out of range (1..{len(self._state.subgoals)})")
+        required = {
+            "owner_evidence": owner_evidence,
+            "issue_comment": issue_comment,
+            "ledger_event": ledger_event,
+            "readback": readback,
+        }
+        missing = [name for name, value in required.items() if not str(value or "").strip()]
+        if missing:
+            raise ValueError("GCW gate promotion requires " + ", ".join(missing))
+        gate = {
+            "subgoal_index": str(index_1based),
+            "text": self._state.subgoals[idx],
+            "owner_evidence": str(owner_evidence).strip(),
+            "issue_comment": str(issue_comment).strip(),
+            "ledger_event": str(ledger_event).strip(),
+            "readback": str(readback).strip(),
+        }
+        self._state.gcw_binding.setdefault("formal_gates", []).append(gate)
+        save_goal(self.session_id, self._state)
+        return gate
 
     def remove_subgoal(self, index_1based: int) -> str:
         """Remove a subgoal by 1-based index. Returns the removed text."""
@@ -793,7 +992,17 @@ class GoalManager:
             )
         else:
             prompt = CONTINUATION_PROMPT_TEMPLATE.format(goal=self._state.goal)
-        if _is_gcw_bound_goal(self._state.goal, self._state.subgoals):
+        if self._state.gcw_binding:
+            if self._state.subgoals:
+                prompt += (
+                    "\n\nCurrent /subgoal items are judge-visible GCW candidate gates "
+                    "and PMO reminders, not yet formal validator gates unless "
+                    "listed in gcw_binding.formal_gates. Explicit promotion "
+                    "requires owner evidence, issue comment, ledger event, and readback."
+                )
+            prompt += _binding_summary(self._state.gcw_binding)
+            prompt += GCW_CONTINUATION_EVIDENCE_BLOCK
+        elif _is_gcw_bound_goal(self._state.goal, self._state.subgoals):
             prompt += GCW_CONTINUATION_EVIDENCE_BLOCK
         return prompt
 

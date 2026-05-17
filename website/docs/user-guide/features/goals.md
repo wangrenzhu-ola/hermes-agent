@@ -40,12 +40,31 @@ What you'll see:
 | Command | What it does |
 |---|---|
 | `/goal <text>` | Set (or replace) the standing goal. Kicks off the first turn immediately so you don't need to send a separate message. |
-| `/goal` or `/goal status` | Show the current goal, its status, and turns used. |
+| `/goal gcw <issue-url> [goal text]` | Create an issue-bound GCW supervisor goal. The state stores the issue URL, goal/session id, run/phase fields, terminal candidate, evidence refs, missing gates, and promoted formal gates for machine readback. |
+| `/goal` or `/goal status` | Show the current goal, its status, and turns used. GCW supervisors also show issue/phase/terminal-candidate summary. |
 | `/goal pause` | Stop the auto-continuation loop without clearing the goal. |
-| `/goal resume` | Resume the loop (resets the turn counter back to zero). |
+| `/goal resume` | Resume the loop (resets the turn counter back to zero). For GCW supervisors, the first continuation explicitly re-reads Issue/status/ledger/artifact/worker/validator evidence before executing more work. |
 | `/goal clear` | Drop the goal entirely. |
 
 Works identically on the CLI and every gateway platform (Telegram, Discord, Slack, Matrix, Signal, WhatsApp, SMS, iMessage, Webhook, API server, and the web dashboard).
+
+### GCW supervisors
+
+GCW work has stricter evidence rules than a normal free-form goal. Use:
+
+```text
+/goal gcw https://github.com/<owner>/<repo>/issues/<n> [optional supervisor goal text]
+```
+
+This creates a GCW-bound goal with a machine-readable `gcw_binding` in persisted state. Continuations and judge prompts require a status/ledger/artifact readback before progress claims, and only GCW terminal state `done` plus closeout evidence can be reported as successful completion. `blocked`, `needs_user`, or `approval_required` stop as non-success handoffs; ordinary `partial`, stale workers, missing artifacts, PR-only evidence, or missing validator/closeout gates continue.
+
+`/subgoal` remains soft by default for GCW: it is judge-visible and PMO-visible, but it does **not** silently mutate validator/AC/approval gates. To promote a subgoal into a formal GCW gate, use the explicit evidence-bearing form:
+
+```text
+/subgoal promote <n> owner=<evidence> comment=<issue-comment-url> ledger=<ledger-event> readback=<summary>
+```
+
+All four evidence fields are required; otherwise Hermes refuses promotion.
 
 ## Behavior details
 
