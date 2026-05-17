@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 
 import asyncio
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -64,6 +65,41 @@ _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+_WEIXIN_LTM_REVIEW_REQUIRED_TERMS = ("长期记忆", "记忆")
+_WEIXIN_LTM_REVIEW_ACTION_TERMS = ("整理", "审查", "检查", "review")
+_WEIXIN_LTM_REVIEW_REPORT_TERMS = ("报告", "汇报", "report")
+
+
+def _is_weixin_ltm_review_intent(text: str) -> bool:
+    """Detect explicit manual long-term-memory review requests."""
+    normalized = re.sub(r"\s+", "", (text or "").lower())
+    if not normalized:
+        return False
+    if not any(term in normalized for term in _WEIXIN_LTM_REVIEW_REQUIRED_TERMS):
+        return False
+    if not any(term in normalized for term in _WEIXIN_LTM_REVIEW_ACTION_TERMS):
+        return False
+    return any(term in normalized for term in _WEIXIN_LTM_REVIEW_REPORT_TERMS)
+
+
+def _ltm_review_run_id(source: Any, message_id: Optional[str]) -> str:
+    parts = [
+        "weixin-ltm-review",
+        str(getattr(source, "user_id", "") or "unknown"),
+        str(getattr(source, "chat_id", "") or "unknown"),
+        str(message_id or int(time.time())),
+    ]
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", "-".join(parts)).strip("-")[:120]
+
+
+def _file_sha256(path: Path) -> Optional[str]:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
@@ -664,6 +700,91 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+def _runtime_credential_label(runtime: Optional[dict]) -> str:
+    """Best-effort human label for the credential used by a runtime bundle."""
+    if not isinstance(runtime, dict):
+        return ""
+    explicit = runtime.get("credential_label") or runtime.get("credential")
+    if explicit:
+        return str(explicit)
+    pool = runtime.get("credential_pool")
+    if pool is not None:
+        try:
+            current = pool.current()
+            if current is not None and getattr(current, "label", None):
+                return str(current.label)
+        except Exception:
+            pass
+    source = runtime.get("source")
+    return str(source) if source else ""
+
+
+def _gateway_route_policy_for_source(
+    cfg: Optional[dict],
+    source: Any = None,
+    *,
+    provider: Optional[str] = None,
+) -> dict:
+    """Return the first matching gateway credential-routing policy.
+
+    Supported config shape (intentionally small and permissive):
+
+    gateway_credential_routing:
+      rules:
+        - platform: weixin
+          chat_id: ...        # optional
+          user_id: ...        # optional
+          provider: openai-codex
+          exclusive: true     # or strict: true / allow_fallback: false
+          fallback_policy: fail_closed
+          runtime_footer: true
+    """
+    routing = (cfg or {}).get("gateway_credential_routing") or {}
+    rules = routing.get("rules") if isinstance(routing, dict) else None
+    if not isinstance(rules, list):
+        return {}
+
+    def _norm(value: Any) -> str:
+        if value is None:
+            return ""
+        if hasattr(value, "value"):
+            value = getattr(value, "value")
+        return str(value).strip().lower()
+
+    src_platform = _norm(getattr(source, "platform", None))
+    src_chat = str(getattr(source, "chat_id", "") or "")
+    src_user = str(getattr(source, "user_id", "") or "")
+    provider_norm = _norm(provider)
+
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("platform") and _norm(rule.get("platform")) != src_platform:
+            continue
+        if rule.get("chat_id") and str(rule.get("chat_id")) != src_chat:
+            continue
+        if rule.get("user_id") and str(rule.get("user_id")) != src_user:
+            continue
+        if rule.get("provider") and provider_norm and _norm(rule.get("provider")) != provider_norm:
+            continue
+        return dict(rule)
+    return {}
+
+
+def _gateway_policy_allows_fallback(policy: Optional[dict]) -> bool:
+    """Whether a matching gateway credential policy permits fallback."""
+    if not policy:
+        return True
+    fallback_policy = str(policy.get("fallback_policy") or "").strip().lower().replace("-", "_")
+    if fallback_policy in {"fail_closed", "failclose", "deny", "disabled", "none"}:
+        return False
+    if policy.get("strict") is True or policy.get("exclusive") is True:
+        return False
+    if policy.get("allow_fallback") is False:
+        return False
+    return True
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -671,7 +792,7 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
-def _resolve_runtime_agent_kwargs() -> dict:
+def _resolve_runtime_agent_kwargs(source: Any = None) -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
     If the primary provider fails with an authentication error, attempt to
@@ -684,22 +805,46 @@ def _resolve_runtime_agent_kwargs() -> dict:
     )
     from hermes_cli.auth import AuthError
 
+    primary_provider = os.getenv("HERMES_INFERENCE_PROVIDER")
     try:
         runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
+            requested=primary_provider,
         )
     except AuthError as auth_exc:
+        try:
+            _cfg = _load_gateway_config()
+        except Exception:
+            _cfg = {}
+        try:
+            _model_cfg = (_cfg or {}).get("model") or {}
+            if not primary_provider and isinstance(_model_cfg, dict):
+                primary_provider = str(_model_cfg.get("provider") or "").strip() or None
+        except Exception:
+            pass
+        policy = _gateway_route_policy_for_source(_cfg, source, provider=primary_provider)
+        if not _gateway_policy_allows_fallback(policy):
+            logger.error(
+                "Gateway credential route fail-closed: platform=%s chat=%s provider=%s reason=%s",
+                getattr(getattr(source, "platform", None), "value", getattr(source, "platform", "")),
+                getattr(source, "chat_id", ""),
+                primary_provider or "auto",
+                auth_exc,
+            )
+            raise RuntimeError(
+                "Configured gateway credential route is unavailable and fallback is disabled: "
+                f"{auth_exc}"
+            ) from auth_exc
         # Primary provider auth failed (expired token, revoked key, etc.).
         # Try the fallback provider chain before raising.
         logger.warning("Primary provider auth failed: %s — trying fallback", auth_exc)
-        fb_config = _try_resolve_fallback_provider()
+        fb_config = _try_resolve_fallback_provider(primary_error=str(auth_exc), primary_provider=primary_provider)
         if fb_config is not None:
             return fb_config
         raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
-    return {
+    result = {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
         "provider": runtime.get("provider"),
@@ -707,10 +852,23 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
+        "credential_label": _runtime_credential_label(runtime),
     }
+    logger.info(
+        "Gateway runtime selected: provider=%s model=%s credential=%s fallback=%s",
+        result.get("provider"),
+        None,
+        result.get("credential_label") or "",
+        False,
+    )
+    return result
 
 
-def _try_resolve_fallback_provider() -> dict | None:
+def _try_resolve_fallback_provider(
+    *,
+    primary_error: str = "",
+    primary_provider: Optional[str] = None,
+) -> dict | None:
     """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
     from hermes_cli.runtime_provider import resolve_runtime_provider
     try:
@@ -747,7 +905,11 @@ def _try_resolve_fallback_provider() -> dict | None:
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),
                     "credential_pool": runtime.get("credential_pool"),
+                    "credential_label": _runtime_credential_label(runtime),
                     "model": entry.get("model"),
+                    "fallback_used": True,
+                    "fallback_reason": primary_error,
+                    "primary_provider": primary_provider,
                 }
             except Exception as fb_exc:
                 logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
@@ -1863,7 +2025,7 @@ class GatewayRunner:
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        runtime_kwargs = _resolve_runtime_agent_kwargs(source=source)
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(
@@ -1917,6 +2079,14 @@ class GatewayRunner:
         route = {
             "model": model,
             "runtime": runtime,
+            "runtime_metadata": {
+                "provider": runtime.get("provider"),
+                "model": model,
+                "credential_label": runtime_kwargs.get("credential_label") or "",
+                "fallback_used": bool(runtime_kwargs.get("fallback_used")),
+                "fallback_reason": runtime_kwargs.get("fallback_reason") or "",
+                "primary_provider": runtime_kwargs.get("primary_provider") or "",
+            },
             "signature": (
                 model,
                 runtime["provider"],
@@ -1938,6 +2108,35 @@ class GatewayRunner:
             overrides = None
         route["request_overrides"] = overrides or {}
         return route
+
+    def _resolve_turn_fallback_model(
+        self,
+        user_config: Optional[dict],
+        source: Any = None,
+        runtime_kwargs: Optional[dict] = None,
+    ) -> list | dict | None:
+        """Return the AIAgent fallback chain allowed for this gateway turn.
+
+        Strict/exclusive gateway credential routes are fail-closed for both
+        runtime credential resolution and later provider/API-time auth errors.
+        Disabling ``fallback_model`` at AIAgent construction prevents the
+        agent's own fallback machinery from silently bypassing those routes.
+        """
+        runtime_kwargs = runtime_kwargs or {}
+        policy = _gateway_route_policy_for_source(
+            user_config,
+            source,
+            provider=runtime_kwargs.get("provider"),
+        )
+        if not _gateway_policy_allows_fallback(policy):
+            logger.info(
+                "Gateway credential route disables agent fallback: platform=%s chat=%s provider=%s",
+                getattr(getattr(source, "platform", None), "value", getattr(source, "platform", "")),
+                getattr(source, "chat_id", ""),
+                runtime_kwargs.get("provider") or "auto",
+            )
+            return None
+        return self._fallback_model
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
@@ -5774,6 +5973,126 @@ class GatewayRunner:
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    def _should_handle_weixin_ltm_review(self, event: MessageEvent) -> bool:
+        source = event.source
+        return (
+            source.platform == Platform.WEIXIN
+            and source.chat_type == "dm"
+            and _is_weixin_ltm_review_intent(event.text or "")
+        )
+
+    async def _handle_weixin_ltm_review(self, event: MessageEvent) -> str:
+        adapter_script = (
+            _hermes_home
+            / "skills"
+            / "infra-sleep-skill"
+            / "references"
+            / "long_term_memory_review.py"
+        )
+        if not adapter_script.exists():
+            logger.error("Weixin LTM review adapter missing: %s", adapter_script)
+            return f"长期记忆整理适配器不存在：`{adapter_script}`"
+
+        run_id = _ltm_review_run_id(event.source, event.message_id)
+        output_dir = _hermes_home / "sleep-reports" / run_id
+        memory_path = _hermes_home / "memories" / "MEMORY.md"
+        user_profile_path = _hermes_home / "memories" / "USER.md"
+        read_only_paths = {
+            "MEMORY.md": memory_path,
+            "USER.md": user_profile_path,
+        }
+        before_sha = {name: _file_sha256(path) for name, path in read_only_paths.items()}
+        cmd = [
+            sys.executable,
+            str(adapter_script),
+            "--memory-path",
+            str(memory_path),
+            "--user-profile-path",
+            str(user_profile_path),
+            "--skills-root",
+            str(_hermes_home / "skills"),
+            "--output-dir",
+            str(output_dir),
+            "--run-id",
+            run_id,
+            "--pretty",
+        ]
+
+        logger.info(
+            "Handling Weixin LTM review intent via adapter: run_id=%s user=%s chat=%s",
+            run_id,
+            event.source.user_id,
+            event.source.chat_id,
+        )
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            logger.error("Weixin LTM review adapter timed out: run_id=%s", run_id)
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Weixin LTM review adapter did not terminate after timeout; killing: run_id=%s",
+                        run_id,
+                    )
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "Weixin LTM review adapter remained alive after kill: run_id=%s",
+                            run_id,
+                        )
+                except ProcessLookupError:
+                    pass
+            return "长期记忆整理超时，未生成报告。"
+        except Exception as exc:
+            logger.exception("Weixin LTM review adapter failed to start")
+            return f"长期记忆整理启动失败：{exc}"
+
+        if proc.returncode != 0:
+            detail = (stderr or stdout or b"").decode("utf-8", errors="replace").strip()
+            logger.error("Weixin LTM review adapter failed: run_id=%s error=%s", run_id, detail)
+            return f"长期记忆整理失败：{detail or 'adapter exited with an error'}"
+
+        after_sha = {name: _file_sha256(path) for name, path in read_only_paths.items()}
+        changed = [
+            name
+            for name in read_only_paths
+            if before_sha.get(name) != after_sha.get(name)
+        ]
+        if changed:
+            logger.error(
+                "Weixin LTM review read-only violation: run_id=%s changed=%s before=%s after=%s",
+                run_id,
+                changed,
+                before_sha,
+                after_sha,
+            )
+            return (
+                "长期记忆整理安全校验失败："
+                f"{', '.join(changed)} 在只读整理期间发生变化，已中止返回报告。"
+            )
+
+        try:
+            result = json.loads(stdout.decode("utf-8"))
+            user_message_path = Path(result["user_message_path"])
+            return user_message_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.exception("Weixin LTM review adapter returned invalid output")
+            return f"长期记忆整理结果读取失败：{exc}"
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -5877,6 +6196,9 @@ class GatewayRunner:
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
+
+        if self._should_handle_weixin_ltm_review(event):
+            return await self._handle_weixin_ltm_review(event)
         
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
@@ -7821,13 +8143,18 @@ class GatewayRunner:
             _footer_line = ""
             try:
                 from gateway.runtime_footer import build_footer_line as _bfl
+                _runtime_metadata = agent_result.get("runtime_metadata") or {}
                 _footer_line = _bfl(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
-                    model=agent_result.get("model"),
+                    model=agent_result.get("model") or _runtime_metadata.get("model"),
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
+                    provider=_runtime_metadata.get("provider"),
+                    credential_label=_runtime_metadata.get("credential_label"),
+                    fallback_used=bool(_runtime_metadata.get("fallback_used")),
+                    fallback_reason=_runtime_metadata.get("fallback_reason"),
                 )
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
@@ -10623,6 +10950,7 @@ class GatewayRunner:
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            fallback_model = self._resolve_turn_fallback_model(user_config, source, runtime_kwargs)
 
             # Enrich the prompt with image descriptions so the background
             # agent can see user-attached images (same as the main flow).
@@ -10668,7 +10996,7 @@ class GatewayRunner:
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     session_db=self._session_db,
-                    fallback_model=self._fallback_model,
+                    fallback_model=fallback_model,
                 )
                 try:
                     return agent.run_conversation(
@@ -15232,16 +15560,19 @@ class GatewayRunner:
                 )
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            fallback_model = self._resolve_turn_fallback_model(user_config, source, runtime_kwargs)
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
             # schemas for prompt cache hits.
+            _cache_keys = dict(self._extract_cache_busting_config(user_config) or {})
+            _cache_keys["gateway_fallback_model"] = fallback_model
             _sig = self._agent_config_signature(
                 turn_route["model"],
                 turn_route["runtime"],
                 enabled_toolsets,
                 combined_ephemeral,
-                cache_keys=self._extract_cache_busting_config(user_config),
+                cache_keys=_cache_keys,
             )
             agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)
@@ -15292,7 +15623,7 @@ class GatewayRunner:
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
                     session_db=self._session_db,
-                    fallback_model=self._fallback_model,
+                    fallback_model=fallback_model,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
@@ -15716,6 +16047,8 @@ class GatewayRunner:
                     _run_message = message
 
                 result = agent.run_conversation(_run_message, conversation_history=agent_history, task_id=session_id)
+                if isinstance(result, dict):
+                    result["runtime_metadata"] = dict(turn_route.get("runtime_metadata") or {})
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 # Cancel any pending clarify entries so blocked agent
