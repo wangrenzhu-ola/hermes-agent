@@ -755,7 +755,8 @@ class _CodexCompletionsAdapter:
 
         def _check_cancelled() -> None:
             if deadline is not None and time.monotonic() >= deadline:
-                timed_out.set()
+                if not timed_out.is_set():
+                    _close_client_on_timeout()
                 raise TimeoutError(_timeout_message())
             try:
                 from tools.interrupt import is_interrupted
@@ -893,15 +894,17 @@ class CodexAuxiliaryClient:
     """OpenAI-client-compatible wrapper that routes through Codex Responses API.
 
     Consumers can call client.chat.completions.create(**kwargs) as normal.
-    Also exposes .api_key and .base_url for introspection by async wrappers.
+    Also exposes .api_key, .base_url, and the source pool credential id for
+    introspection/recovery by async wrappers.
     """
 
-    def __init__(self, real_client: OpenAI, model: str):
+    def __init__(self, real_client: OpenAI, model: str, pool_credential_id: Optional[str] = None):
         self._real_client = real_client
         adapter = _CodexCompletionsAdapter(real_client, model)
         self.chat = _CodexChatShim(adapter)
         self.api_key = real_client.api_key
         self.base_url = real_client.base_url
+        self._pool_credential_id = pool_credential_id
 
     def close(self):
         self._real_client.close()
@@ -936,6 +939,7 @@ class AsyncCodexAuxiliaryClient:
         self.chat = _AsyncCodexChatShim(async_adapter)
         self.api_key = sync_wrapper.api_key
         self.base_url = sync_wrapper.base_url
+        self._pool_credential_id = getattr(sync_wrapper, "_pool_credential_id", None)
         # Mirror the sync wrapper's _real_client so cache eviction by leaf
         # OpenAI client (e.g. _close_client_on_timeout in #23482) drops
         # this async entry too. Without this, sync and async cache entries
@@ -1879,7 +1883,8 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
         base_url=base_url,
         default_headers=_codex_cloudflare_headers(codex_token),
     )
-    return CodexAuxiliaryClient(real_client, model), model
+    pool_credential_id = str(getattr(entry, "id", "") or "").strip() if pool_present and entry is not None else None
+    return CodexAuxiliaryClient(real_client, model, pool_credential_id=pool_credential_id), model
 
 
 def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optional[str]]:
@@ -2332,8 +2337,14 @@ def _recoverable_pool_provider(resolved_provider: str, client: Any) -> Optional[
     return None
 
 
-def _recover_provider_pool(provider: str, exc: Exception) -> bool:
-    """Try same-provider credential-pool recovery for auxiliary calls."""
+def _recover_provider_pool(provider: str, exc: Exception, *, failed_credential_id: Optional[str] = None) -> bool:
+    """Try same-provider credential-pool recovery for auxiliary calls.
+
+    When the failed auxiliary client was built from a credential-pool entry,
+    ``failed_credential_id`` pins exhaustion marking to that exact entry.
+    This avoids reloading the pool during recovery and marking whichever entry
+    is currently selected after concurrent calls or round-robin rotation.
+    """
     normalized = _normalize_aux_provider(provider)
     try:
         pool = load_pool(normalized)
@@ -2354,6 +2365,7 @@ def _recover_provider_pool(provider: str, exc: Exception) -> bool:
         next_entry = pool.mark_exhausted_and_rotate(
             status_code=status_code if status_code is not None else 401,
             error_context=error_context,
+            credential_id=failed_credential_id,
         )
         if next_entry is not None:
             _evict_cached_clients(normalized)
@@ -2365,6 +2377,7 @@ def _recover_provider_pool(provider: str, exc: Exception) -> bool:
         next_entry = pool.mark_exhausted_and_rotate(
             status_code=status_code if status_code is not None else fallback_status,
             error_context=error_context,
+            credential_id=failed_credential_id,
         )
         if next_entry is not None:
             _evict_cached_clients(normalized)
@@ -4475,7 +4488,8 @@ def call_llm(
                     if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
                         raise
                     recovery_err = retry_err
-            if _recover_provider_pool(pool_provider, recovery_err):
+            failed_credential_id = str(getattr(client, "_pool_credential_id", "") or "").strip() or None
+            if _recover_provider_pool(pool_provider, recovery_err, failed_credential_id=failed_credential_id):
                 logger.info(
                     "Auxiliary %s: recovered %s via credential-pool rotation after %s",
                     task or "call", pool_provider, type(recovery_err).__name__,
@@ -4824,7 +4838,8 @@ async def async_call_llm(
                     if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
                         raise
                     recovery_err = retry_err
-            if _recover_provider_pool(pool_provider, recovery_err):
+            failed_credential_id = str(getattr(client, "_pool_credential_id", "") or "").strip() or None
+            if _recover_provider_pool(pool_provider, recovery_err, failed_credential_id=failed_credential_id):
                 logger.info(
                     "Auxiliary %s (async): recovered %s via credential-pool rotation after %s",
                     task or "call", pool_provider, type(recovery_err).__name__,

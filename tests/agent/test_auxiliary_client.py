@@ -25,6 +25,7 @@ from agent.auxiliary_client import (
     _is_rate_limit_error,
     _normalize_aux_provider,
     _try_payment_fallback,
+    _recover_provider_pool,
     _resolve_auto,
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
@@ -2808,3 +2809,55 @@ class TestAuxUnhealthyCache:
             )
             # After the 402, OpenRouter is in the unhealthy cache.
             assert _is_provider_unhealthy("openrouter") is True
+
+
+class TestAuxiliaryPoolRecoveryCredentialPinning:
+    def test_recover_provider_pool_marks_failed_credential_id(self, monkeypatch):
+        calls = []
+        next_entry = SimpleNamespace(id="cred-next", label="next")
+
+        class _Pool:
+            def has_credentials(self):
+                return True
+
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None, credential_id=None):
+                calls.append((status_code, error_context, credential_id))
+                return next_entry
+
+        class _RateLimitError(Exception):
+            status_code = 429
+
+        monkeypatch.setattr("agent.auxiliary_client.load_pool", lambda provider: _Pool())
+        assert _recover_provider_pool("openai-codex", _RateLimitError("usage_limit_reached"), failed_credential_id="cred-failed") is True
+        assert calls == [(429, {"message": "usage_limit_reached", "status_code": 429}, "cred-failed")]
+
+    def test_build_codex_client_records_selected_pool_credential_id(self, monkeypatch):
+        entry = SimpleNamespace(
+            id="codex-account-6",
+            runtime_api_key="codex-token",
+            access_token="codex-token",
+            runtime_base_url="https://chatgpt.com/backend-api/codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+        created = {}
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+                self.api_key = kwargs["api_key"]
+                self.base_url = kwargs["base_url"]
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("agent.auxiliary_client._select_pool_entry", lambda provider: (True, entry))
+        monkeypatch.setattr("agent.auxiliary_client.OpenAI", _FakeOpenAI)
+        monkeypatch.setattr("agent.auxiliary_client._codex_cloudflare_headers", lambda token: {"h": token})
+
+        from agent.auxiliary_client import _build_codex_client
+
+        client, model = _build_codex_client("gpt-5.5")
+
+        assert model == "gpt-5.5"
+        assert getattr(client, "_pool_credential_id") == "codex-account-6"
+        assert created["api_key"] == "codex-token"

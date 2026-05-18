@@ -1405,9 +1405,20 @@ class CredentialPool:
         *,
         status_code: Optional[int],
         error_context: Optional[Dict[str, Any]] = None,
+        credential_id: Optional[str] = None,
     ) -> Optional[PooledCredential]:
         with self._lock:
-            entry = self.current() or self._select_unlocked()
+            if credential_id:
+                entry = next((candidate for candidate in self._entries if candidate.id == credential_id), None)
+                if entry is None:
+                    logger.warning(
+                        "credential pool: requested exhausted mark for unknown credential id %s on provider %s",
+                        credential_id,
+                        self.provider,
+                    )
+                    return None
+            else:
+                entry = self.current() or self._select_unlocked()
             if entry is None:
                 return None
             _label = entry.label or entry.id[:8]
@@ -1416,7 +1427,8 @@ class CredentialPool:
                 _label, status_code,
             )
             self._mark_exhausted(entry, status_code, error_context)
-            self._current_id = None
+            if self._current_id == entry.id:
+                self._current_id = None
             next_entry = self._select_unlocked()
             if next_entry:
                 _next_label = next_entry.label or next_entry.id[:8]

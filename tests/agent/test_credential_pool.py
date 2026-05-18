@@ -1917,3 +1917,46 @@ def test_codex_exhausted_entry_stays_stuck_without_auth_store_update(tmp_path, m
     # still skips it.
     available = pool._available_entries(clear_expired=True, refresh=False)
     assert available == []
+
+
+def test_mark_exhausted_and_rotate_targets_explicit_credential_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "cred-1",
+                        "label": "primary",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual",
+                        "access_token": "tok-1",
+                    },
+                    {
+                        "id": "cred-2",
+                        "label": "secondary",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual",
+                        "access_token": "tok-2",
+                    },
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    pool.select()
+    pool.mark_exhausted_and_rotate(status_code=429, error_context={"reason": "usage_limit_reached"}, credential_id="cred-2")
+
+    reloaded = load_pool("openai-codex")
+    entries = {entry.id: entry for entry in reloaded.entries()}
+    assert entries["cred-1"].last_status != "exhausted"
+    assert entries["cred-2"].last_status == "exhausted"
+    assert entries["cred-2"].last_error_code == 429
+    assert entries["cred-2"].last_error_reason == "usage_limit_reached"
