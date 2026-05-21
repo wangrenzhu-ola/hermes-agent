@@ -1,0 +1,268 @@
+{
+  "package_id": "public-redacted-beauty-handoff-2026-05",
+  "app": {
+    "name": "Example Beauty App",
+    "category": "photo-and-video",
+    "metadata_source": "synthetic public sample"
+  },
+  "locale": "en-US",
+  "target_size": {
+    "width": 1290,
+    "height": 2796,
+    "unit": "px"
+  },
+  "screenshots": [
+    {
+      "id": "s01",
+      "sequence": 1,
+      "image_path": "images/s01-before.svg",
+      "title_copy": {
+        "headline": "Glow up your photo",
+        "subtitle": "Synthetic public sample",
+        "source": "redacted example",
+        "designer_editable": true
+      },
+      "background": {
+        "theme": "fresh clean beauty",
+        "palette": [
+          "#FCE7F3",
+          "#A855F7"
+        ],
+        "editable": true,
+        "notes": "Designer may adjust palette/depth while keeping contrast."
+      },
+      "person": {
+        "type": "synthetic placeholder avatar",
+        "crop_box": {
+          "x": 390,
+          "y": 725,
+          "width": 510,
+          "height": 520
+        },
+        "editable_scope": "lighting/crop polish only in real private packages"
+      },
+      "device_frame": {
+        "type": "phone mockup",
+        "bounds": {
+          "x": 315,
+          "y": 600,
+          "width": 660,
+          "height": 1430
+        },
+        "locked_region": "inside product screenshot unless PM approves"
+      },
+      "decorations": [
+        {
+          "layer_id": "accent_orbs",
+          "editable": true
+        },
+        {
+          "layer_id": "bottom_guidance_copy",
+          "editable": true
+        }
+      ],
+      "editable_layers": [
+        "background",
+        "title_copy",
+        "decorations",
+        "person_lighting_crop"
+      ],
+      "locked_layers": [
+        "device_frame.product_region",
+        "review_safety.claims",
+        "target_size",
+        "sequence"
+      ],
+      "review_safety": [
+        "No adult/sexualized styling",
+        "No fake product claims",
+        "No private data",
+        "No underage ambiguity"
+      ],
+      "generation_evidence": {
+        "run_id": "public-redacted-example",
+        "prompt_id": "example-s01",
+        "source_hash": "synthetic-svg-no-private-source",
+        "redaction_status": "synthetic_public_sample"
+      },
+      "designer_notes": "Use this record as a structural template; replace placeholder values in private handoffs.",
+      "return_expected": {
+        "image": "images/s01-after.png",
+        "change_log_required": true
+      }
+    },
+    {
+      "id": "s02",
+      "sequence": 2,
+      "image_path": "images/s02-before.svg",
+      "title_copy": {
+        "headline": "Clean edits in seconds",
+        "subtitle": "Synthetic public sample",
+        "source": "redacted example",
+        "designer_editable": true
+      },
+      "background": {
+        "theme": "fresh clean beauty",
+        "palette": [
+          "#E0F2FE",
+          "#06B6D4"
+        ],
+        "editable": true,
+        "notes": "Designer may adjust palette/depth while keeping contrast."
+      },
+      "person": {
+        "type": "synthetic placeholder avatar",
+        "crop_box": {
+          "x": 390,
+          "y": 725,
+          "width": 510,
+          "height": 520
+        },
+        "editable_scope": "lighting/crop polish only in real private packages"
+      },
+      "device_frame": {
+        "type": "phone mockup",
+        "bounds": {
+          "x": 315,
+          "y": 600,
+          "width": 660,
+          "height": 1430
+        },
+        "locked_region": "inside product screenshot unless PM approves"
+      },
+      "decorations": [
+        {
+          "layer_id": "accent_orbs",
+          "editable": true
+        },
+        {
+          "layer_id": "bottom_guidance_copy",
+          "editable": true
+        }
+      ],
+      "editable_layers": [
+        "background",
+        "title_copy",
+        "decorations",
+        "person_lighting_crop"
+      ],
+      "locked_layers": [
+        "device_frame.product_region",
+        "review_safety.claims",
+        "target_size",
+        "sequence"
+      ],
+      "review_safety": [
+        "No adult/sexualized styling",
+        "No fake product claims",
+        "No private data",
+        "No underage ambiguity"
+      ],
+      "generation_evidence": {
+        "run_id": "public-redacted-example",
+        "prompt_id": "example-s02",
+        "source_hash": "synthetic-svg-no-private-source",
+        "redaction_status": "synthetic_public_sample"
+      },
+      "designer_notes": "Use this record as a structural template; replace placeholder values in private handoffs.",
+      "return_expected": {
+        "image": "images/s02-after.png",
+        "change_log_required": true
+      }
+    },
+    {
+      "id": "s03",
+      "sequence": 3,
+      "image_path": "images/s03-before.svg",
+      "title_copy": {
+        "headline": "Share a polished look",
+        "subtitle": "Synthetic public sample",
+        "source": "redacted example",
+        "designer_editable": true
+      },
+      "background": {
+        "theme": "fresh clean beauty",
+        "palette": [
+          "#FEF3C7",
+          "#F97316"
+        ],
+        "editable": true,
+        "notes": "Designer may adjust palette/depth while keeping contrast."
+      },
+      "person": {
+        "type": "synthetic placeholder avatar",
+        "crop_box": {
+          "x": 390,
+          "y": 725,
+          "width": 510,
+          "height": 520
+        },
+        "editable_scope": "lighting/crop polish only in real private packages"
+      },
+      "device_frame": {
+        "type": "phone mockup",
+        "bounds": {
+          "x": 315,
+          "y": 600,
+          "width": 660,
+          "height": 1430
+        },
+        "locked_region": "inside product screenshot unless PM approves"
+      },
+      "decorations": [
+        {
+          "layer_id": "accent_orbs",
+          "editable": true
+        },
+        {
+          "layer_id": "bottom_guidance_copy",
+          "editable": true
+        }
+      ],
+      "editable_layers": [
+        "background",
+        "title_copy",
+        "decorations",
+        "person_lighting_crop"
+      ],
+      "locked_layers": [
+        "device_frame.product_region",
+        "review_safety.claims",
+        "target_size",
+        "sequence"
+      ],
+      "review_safety": [
+        "No adult/sexualized styling",
+        "No fake product claims",
+        "No private data",
+        "No underage ambiguity"
+      ],
+      "generation_evidence": {
+        "run_id": "public-redacted-example",
+        "prompt_id": "example-s03",
+        "source_hash": "synthetic-svg-no-private-source",
+        "redaction_status": "synthetic_public_sample"
+      },
+      "designer_notes": "Use this record as a structural template; replace placeholder values in private handoffs.",
+      "return_expected": {
+        "image": "images/s03-after.png",
+        "change_log_required": true
+      }
+    }
+  ],
+  "safety": {
+    "review_boundaries": [
+      "Public package contains synthetic/redacted content only",
+      "Do not publish real private assets",
+      "Keep beauty style clean, non-adult, and non-deceptive"
+    ]
+  },
+  "return_contract": {
+    "designer_change_log_required": true,
+    "returned_image_pattern": "images/{screenshot_id}-after.png",
+    "required_files": [
+      "designer_change_log.json",
+      "notes.md"
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/gimg-beauty-designer-handoff.schema.json",
+  "title": "GIMG beauty screenshot designer handoff manifest",
+  "type": "object",
+  "required": ["package_id", "app", "locale", "target_size", "screenshots", "safety", "return_contract"],
+  "properties": {
+    "package_id": {"type": "string", "minLength": 3},
+    "app": {
+      "type": "object",
+      "required": ["name", "category", "metadata_source"],
+      "properties": {
+        "name": {"type": "string"},
+        "category": {"type": "string"},
+        "metadata_source": {"type": "string"}
+      }
+    },
+    "locale": {"type": "string"},
+    "target_size": {
+      "type": "object",
+      "required": ["width", "height", "unit"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "unit": {"const": "px"}
+      }
+    },
+    "screenshots": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["id", "sequence", "image_path", "title_copy", "background", "person", "device_frame", "decorations", "editable_layers", "locked_layers", "review_safety", "generation_evidence", "designer_notes", "return_expected"],
+        "properties": {
+          "id": {"type": "string"},
+          "sequence": {"type": "integer", "minimum": 1},
+          "image_path": {"type": "string"},
+          "title_copy": {"type": "object"},
+          "background": {"type": "object"},
+          "person": {"type": "object"},
+          "device_frame": {"type": "object"},
+          "decorations": {"type": "array"},
+          "editable_layers": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "locked_layers": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "review_safety": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "generation_evidence": {"type": "object"},
+          "designer_notes": {"type": "string"},
+          "return_expected": {"type": "object"}
+        }
+      }
+    },
+    "safety": {"type": "object"},
+    "return_contract": {"type": "object"}
+  }
+}

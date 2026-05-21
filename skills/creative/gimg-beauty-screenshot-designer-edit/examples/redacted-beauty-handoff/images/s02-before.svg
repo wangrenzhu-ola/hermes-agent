@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1290" height="2796" viewBox="0 0 1290 2796">
+  <rect width="1290" height="2796" fill="#E0F2FE"/>
+  <circle cx="1040" cy="300" r="220" fill="#06B6D4" opacity="0.18"/>
+  <circle cx="180" cy="2400" r="280" fill="#06B6D4" opacity="0.14"/>
+  <text x="120" y="260" font-size="88" font-family="Arial, sans-serif" font-weight="700" fill="#111827">Clean edits in seconds</text>
+  <text x="120" y="360" font-size="40" font-family="Arial, sans-serif" fill="#374151">Synthetic public sample — replace with real screenshot privately</text>
+  <rect x="315" y="600" width="660" height="1430" rx="90" fill="#111827"/>
+  <rect x="350" y="660" width="590" height="1310" rx="55" fill="#ffffff"/>
+  <rect x="390" y="725" width="510" height="520" rx="40" fill="#06B6D4" opacity="0.28"/>
+  <circle cx="645" cy="930" r="115" fill="#F9A8D4"/>
+  <rect x="470" y="1100" width="350" height="85" rx="42" fill="#FBCFE8"/>
+  <rect x="410" y="1330" width="470" height="70" rx="35" fill="#E5E7EB"/>
+  <rect x="410" y="1440" width="390" height="70" rx="35" fill="#E5E7EB"/>
+  <rect x="410" y="1550" width="450" height="70" rx="35" fill="#E5E7EB"/>
+  <text x="120" y="2250" font-size="54" font-family="Arial, sans-serif" font-weight="700" fill="#111827">Editable: background, typography, decorations</text>
+  <text x="120" y="2330" font-size="42" font-family="Arial, sans-serif" fill="#374151">Locked: product UI region, review claims, export size</text>
+</svg>
