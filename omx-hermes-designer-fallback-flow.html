@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OMX 设计师智能体 → Hermes 兜底流程图</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #020617;
+    color: #e5e7eb;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif;
+  }
+  .canvas {
+    width: 1600px;
+    height: 1000px;
+    position: relative;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 15% 10%, rgba(34,211,238,.12), transparent 26%),
+      radial-gradient(circle at 80% 18%, rgba(168,85,247,.12), transparent 25%),
+      radial-gradient(circle at 58% 85%, rgba(251,146,60,.09), transparent 28%),
+      linear-gradient(#020617, #020617);
+  }
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(148,163,184,.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148,163,184,.08) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: linear-gradient(to bottom, rgba(0,0,0,.95), rgba(0,0,0,.55));
+  }
+  .title { position: absolute; left: 70px; top: 42px; }
+  .title h1 { margin: 0; font-size: 42px; letter-spacing: -1px; }
+  .title p { margin: 12px 0 0; color: #94a3b8; font-size: 20px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 14px; border: 1px solid #f59e0b; color: #fde68a;
+    background: rgba(120,53,15,.35); border-radius: 999px; font-weight: 700;
+    margin-bottom: 16px; font-size: 16px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 18px #22c55e; }
+  .lane {
+    position: absolute; top: 185px; width: 470px; height: 690px;
+    border: 1.5px dashed rgba(148,163,184,.35); border-radius: 26px;
+    background: rgba(15,23,42,.28);
+  }
+  .lane h2 { margin: 20px 24px; font-size: 22px; color: #cbd5e1; }
+  .lane.source { left: 58px; border-color: rgba(34,211,238,.42); }
+  .lane.gate { left: 565px; border-color: rgba(251,146,60,.48); }
+  .lane.hermes { left: 1072px; border-color: rgba(52,211,153,.48); }
+  .box {
+    position: absolute; width: 360px; min-height: 88px; padding: 18px 20px;
+    border-radius: 18px; border: 2px solid #64748b;
+    background: #0f172a; box-shadow: 0 18px 40px rgba(0,0,0,.28);
+  }
+  .box .kicker { font-size: 14px; color: #94a3b8; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; }
+  .box .name { margin-top: 7px; font-size: 22px; font-weight: 800; line-height: 1.22; }
+  .box .desc { margin-top: 8px; color: #cbd5e1; font-size: 15px; line-height: 1.35; }
+  .cyan { border-color: #22d3ee; background: linear-gradient(180deg, rgba(8,51,68,.92), rgba(15,23,42,.98)); }
+  .orange { border-color: #fb923c; background: linear-gradient(180deg, rgba(120,53,15,.86), rgba(15,23,42,.98)); }
+  .green { border-color: #34d399; background: linear-gradient(180deg, rgba(6,78,59,.86), rgba(15,23,42,.98)); }
+  .purple { border-color: #a78bfa; background: linear-gradient(180deg, rgba(76,29,149,.82), rgba(15,23,42,.98)); }
+  .rose { border-color: #fb7185; background: linear-gradient(180deg, rgba(136,19,55,.84), rgba(15,23,42,.98)); }
+  .slate { border-color: #94a3b8; background: linear-gradient(180deg, rgba(30,41,59,.92), rgba(15,23,42,.98)); }
+  .small { width: 300px; min-height: 76px; padding: 15px 17px; }
+  .small .name { font-size: 19px; }
+  .decision {
+    position: absolute; width: 190px; height: 190px;
+    transform: rotate(45deg); border-radius: 22px;
+    border: 2px solid #fbbf24; background: linear-gradient(135deg, rgba(120,53,15,.9), rgba(15,23,42,.98));
+    box-shadow: 0 18px 40px rgba(0,0,0,.30);
+  }
+  .decision .inner { transform: rotate(-45deg); width: 190px; height: 190px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding: 20px; }
+  .decision .q { color:#fde68a; font-size: 20px; font-weight:900; line-height:1.25; }
+  .decision .sub { color:#cbd5e1; font-size: 14px; line-height:1.35; margin-top:8px; }
+  svg.arrows { position:absolute; inset:0; pointer-events:none; }
+  .label {
+    position:absolute; padding: 6px 10px; border-radius: 999px; font-size: 14px; font-weight: 800;
+    background: rgba(15,23,42,.92); border: 1px solid rgba(148,163,184,.35); color:#cbd5e1;
+  }
+  .footer {
+    position:absolute; left:70px; right:70px; bottom:42px; display:grid; grid-template-columns: 1fr 1fr 1fr; gap:22px;
+  }
+  .card { border:1px solid rgba(148,163,184,.25); border-radius:18px; padding:18px 20px; background:rgba(15,23,42,.72); }
+  .card h3 { margin:0 0 8px; font-size:19px; }
+  .card p { margin:0; color:#cbd5e1; font-size:15px; line-height:1.4; }
+  .em { color:#67e8f9; font-weight:900; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <div class="grid"></div>
+  <div class="title">
+    <div class="badge"><span class="dot"></span>小步快跑 MVP：Hermes 只做 OMX 不可用时的设计师兜底</div>
+    <h1>OMX 设计师智能体 → Hermes 兜底流程图</h1>
+    <p>核心思路：先复刻“最小设计审阅 + 结构化 handoff + fail-closed gate”，不重做完整 OMX runtime。</p>
+  </div>
+
+  <div class="lane source"><h2>① 输入事实源 / 业务包</h2></div>
+  <div class="lane gate"><h2>② 路由与 Gate</h2></div>
+  <div class="lane hermes"><h2>③ Hermes 兜底设计师</h2></div>
+
+  <svg class="arrows" viewBox="0 0 1600 1000">
+    <defs>
+      <marker id="arrowC" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></marker>
+      <marker id="arrowO" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></marker>
+      <marker id="arrowG" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></marker>
+      <marker id="arrowR" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10" fill="none" stroke="#fb7185" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    </defs>
+    <path d="M425 320 C505 320 535 330 605 360" stroke="#22d3ee" stroke-width="3" fill="none" marker-end="url(#arrowC)"/>
+    <path d="M758 455 C800 530 800 610 760 685" stroke="#fb923c" stroke-width="3" fill="none" marker-end="url(#arrowO)"/>
+    <path d="M855 455 C940 430 1000 392 1085 355" stroke="#34d399" stroke-width="3" fill="none" marker-end="url(#arrowG)"/>
+    <path d="M1260 438 L1260 496" stroke="#34d399" stroke-width="3" fill="none" marker-end="url(#arrowG)"/>
+    <path d="M1260 606 L1260 662" stroke="#34d399" stroke-width="3" fill="none" marker-end="url(#arrowG)"/>
+    <path d="M1435 705 C1505 720 1518 805 1432 830 C1250 882 1092 835 975 778" stroke="#34d399" stroke-width="3" fill="none" marker-end="url(#arrowG)"/>
+    <path d="M1085 735 C1018 732 968 710 925 675" stroke="#fb7185" stroke-width="3" stroke-dasharray="8 7" fill="none" marker-end="url(#arrowR)"/>
+    <path d="M720 755 C610 755 520 705 428 615" stroke="#fb923c" stroke-width="3" fill="none" marker-end="url(#arrowO)"/>
+  </svg>
+
+  <div class="box cyan" style="left:95px; top:280px;">
+    <div class="kicker">Input Package</div>
+    <div class="name">视觉包 / App Store 素材包</div>
+    <div class="desc">images + manifest/metadata + edit brief + 审核约束。真实素材只走内部事实源，公开仓库放脱敏样例。</div>
+  </div>
+
+  <div class="box purple small" style="left:125px; top:520px;">
+    <div class="kicker">Context</div>
+    <div class="name">OMX 设计师契约</div>
+    <div class="desc">提取最小职责：审美、相似度、可读性、审核安全、交付完整性。</div>
+  </div>
+
+  <div class="decision" style="left:660px; top:310px;">
+    <div class="inner">
+      <div class="q">OMX 可用吗？</div>
+      <div class="sub">可用 → 正常 OMX designer gate<br/>不可用/超时/失败 → Hermes 兜底</div>
+    </div>
+  </div>
+
+  <div class="box orange small" style="left:640px; top:665px;">
+    <div class="kicker">Normal Path</div>
+    <div class="name">OMX 正常设计师 Gate</div>
+    <div class="desc">OMX 恢复时回到主路径；Hermes 只作为临时兜底和证据补位。</div>
+  </div>
+
+  <div class="label" style="left:520px; top:300px; color:#67e8f9;">输入包</div>
+  <div class="label" style="left:832px; top:387px; color:#86efac;">fallback</div>
+  <div class="label" style="left:772px; top:560px; color:#fdba74;">normal</div>
+
+  <div class="box green" style="left:1092px; top:310px;">
+    <div class="kicker">Hermes Skill / Profile / Subagent</div>
+    <div class="name">兜底设计师智能体入口</div>
+    <div class="desc">先用 skill/profile/subagent 组合复刻，不先做平台；能被 /gimg / /gapp 流水线显式调用。</div>
+  </div>
+
+  <div class="box green" style="left:1092px; top:500px;">
+    <div class="kicker">Design Review</div>
+    <div class="name">五类检查 + 修改建议</div>
+    <div class="desc">构图/文案可读性/差异化相似度/审核安全/metadata 完整性；给出二次编辑 handoff。</div>
+  </div>
+
+  <div class="box rose" style="left:1092px; top:667px;">
+    <div class="kicker">Fail-Closed Gate</div>
+    <div class="name">通过 / 返修 / 停下人工确认</div>
+    <div class="desc">无法判断不放行；高风险素材、疑似侵权、相似度过高、审核风险 → 返修或人工。</div>
+  </div>
+
+  <div class="box slate small" style="left:700px; top:820px; width:330px;">
+    <div class="kicker">Evidence Loop</div>
+    <div class="name">证据回写 Issue / 私有事实源</div>
+    <div class="desc">结构化报告、样例包、截图/日志、gate 结论，回写 #345 与内部制品库。</div>
+  </div>
+
+  <div class="footer">
+    <div class="card">
+      <h3>第一步：只复刻最小能力</h3>
+      <p>不要一开始搬 OMX runtime；先把“设计师判断标准 + 输入输出契约 + gate 结论”固化到 Hermes。</p>
+    </div>
+    <div class="card">
+      <h3>第二步：兜底触发清晰</h3>
+      <p>只有 OMX 不可用、超时、失败，或需要 Hermes 临时顶上设计师 gate 时触发；主路径仍保留 OMX。</p>
+    </div>
+    <div class="card">
+      <h3>第三步：证据闭环</h3>
+      <p>每次兜底必须产出<span class="em">可回读证据</span>：报告、manifest readback、风险项、pass/fail 和下一步。</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>
