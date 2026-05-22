@@ -235,6 +235,24 @@ class TestAdaptivePoolConfigValidation:
         assert issues == []
 
 
+    def test_gateway_credential_routing_is_known_root_key(self):
+        issues = validate_config_structure({
+            "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+            "gateway_credential_routing": {
+                "rules": [
+                    {
+                        "provider": "openai-codex",
+                        "platform": "weixin",
+                        "allow_labels": ["gpt-pro-account-7"],
+                        "conditional_labels": ["codex-plus-account-3"],
+                    }
+                ]
+            },
+        })
+
+        assert issues == []
+
+
 class TestConfigIssueDataclass:
     """ConfigIssue should be a proper dataclass."""
 
