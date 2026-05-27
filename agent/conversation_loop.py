@@ -2822,6 +2822,10 @@ def run_conversation(
                 # provider/network failure (malformed response body,
                 # truncated stream, routing layer corruption), not a
                 # local programming bug, and should be retried (#14782).
+                _is_malformed_response_type_error = (
+                    isinstance(api_error, TypeError)
+                    and ("NoneType" in str(api_error) or "not iterable" in str(api_error))
+                )
                 is_local_validation_error = (
                     isinstance(api_error, (ValueError, TypeError))
                     and not isinstance(
@@ -2835,6 +2839,10 @@ def run_conversation(
                     # ssl.SSLError explicitly so the error classifier's
                     # retryable=True mapping takes effect instead.
                     and not isinstance(api_error, ssl.SSLError)
+                    # TypeError from malformed provider responses (e.g.
+                    # chatgpt.com backend returning None where SDK expects
+                    # a list) should be retried, not aborted.
+                    and not _is_malformed_response_type_error
                 )
                 # ``FailoverReason.billing`` (HTTP 402) is NOT in this
                 # exclusion set.  By the time we reach this block:

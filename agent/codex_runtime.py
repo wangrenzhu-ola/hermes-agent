@@ -287,6 +287,24 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 exc,
             )
             return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+        except TypeError as exc:
+            if "NoneType" in str(exc) or "not iterable" in str(exc):
+                if attempt < max_stream_retries:
+                    logger.warning(
+                        "Codex Responses stream got malformed event (attempt %s/%s); retrying. %s error=%s",
+                        attempt + 1,
+                        max_stream_retries + 1,
+                        agent._client_log_context(),
+                        exc,
+                    )
+                    continue
+                logger.warning(
+                    "Codex Responses stream got malformed event; falling back to non-streaming create(). %s error=%s",
+                    agent._client_log_context(),
+                    exc,
+                )
+                return _run_codex_non_streaming_fallback(agent, api_kwargs, client=active_client)
+            raise
         except RuntimeError as exc:
             err_text = str(exc)
             missing_completed = "response.completed" in err_text
@@ -344,7 +362,16 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
     fallback_kwargs = dict(api_kwargs)
     fallback_kwargs["stream"] = True
     fallback_kwargs = agent._get_transport().preflight_kwargs(fallback_kwargs, allow_stream=True)
-    stream_or_response = active_client.responses.create(**fallback_kwargs)
+    try:
+        stream_or_response = active_client.responses.create(**fallback_kwargs)
+    except TypeError as exc:
+        if "NoneType" in str(exc) or "not iterable" in str(exc):
+            logger.warning(
+                "Codex create(stream=True) hit malformed response; using non-streaming fallback. %s error=%s",
+                agent._client_log_context(), exc,
+            )
+            return _run_codex_non_streaming_fallback(agent, api_kwargs, client=active_client)
+        raise
 
     # Compatibility shim for mocks or providers that still return a concrete response.
     if hasattr(stream_or_response, "output"):
@@ -361,8 +388,6 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
             event_type = getattr(event, "type", None)
             if not event_type and isinstance(event, dict):
                 event_type = event.get("type")
-
-            # ``error`` SSE frames carry the provider's real failure
             # reason (subscription / quota / model-not-available /
             # rejected-reasoning-replay) but never appear in the
             # ``{completed, incomplete, failed}`` terminal set, so the
@@ -433,6 +458,14 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
                             len(collected_text_deltas), len(assembled),
                         )
                 return terminal_response
+    except TypeError as exc:
+        if "NoneType" in str(exc) or "not iterable" in str(exc):
+            logger.warning(
+                "Codex fallback stream iteration hit malformed event; using non-streaming fallback. %s error=%s",
+                agent._client_log_context(), exc,
+            )
+            return _run_codex_non_streaming_fallback(agent, api_kwargs, client=active_client)
+        raise
     finally:
         close_fn = getattr(stream_or_response, "close", None)
         if callable(close_fn):
@@ -445,6 +478,135 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
         return terminal_response
     raise RuntimeError("Responses create(stream=True) fallback did not emit a terminal response.")
 
+
+def _run_codex_non_streaming_fallback(agent, api_kwargs: dict, client: Any = None):
+    """Last resort when the SDK stream helper crashes on malformed SSE events.
+
+    Bypasses the OpenAI SDK entirely and does a raw httpx streaming POST,
+    manually parsing SSE events. This avoids SDK type-construction code
+    that crashes on malformed chatgpt.com backend responses.
+    """
+    import httpx as _httpx
+
+    active_client = client or agent._ensure_primary_openai_client(reason="codex_non_streaming_fallback")
+    fallback_kwargs = dict(api_kwargs)
+    fallback_kwargs["stream"] = True
+    fallback_kwargs = agent._get_transport().preflight_kwargs(fallback_kwargs, allow_stream=True)
+
+    # Extract connection info from the OpenAI client
+    base_url = str(getattr(active_client, "base_url", "")).rstrip("/")
+    api_key = getattr(active_client, "api_key", "")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    extra_headers = fallback_kwargs.pop("extra_headers", None)
+    if isinstance(extra_headers, dict):
+        headers.update({k: str(v) for k, v in extra_headers.items() if v is not None})
+
+    url = f"{base_url}/responses"
+    # Strip fields the chatgpt.com backend rejects
+    for _unsupported in ("timeout",):
+        fallback_kwargs.pop(_unsupported, None)
+    body = json.dumps(fallback_kwargs, ensure_ascii=False)
+
+    collected_output_items: list = []
+    collected_text_deltas: list = []
+    final_response_data: dict = {}
+
+    try:
+        with _httpx.Client(timeout=_httpx.Timeout(300.0, connect=30.0)) as http:
+            with http.stream("POST", url, headers=headers, content=body) as resp:
+                if resp.status_code != 200:
+                    resp.read()
+                    raise RuntimeError(
+                        f"Codex raw fallback HTTP {resp.status_code}: {resp.text[:500]}"
+                    )
+                current_event = ""
+                for line in resp.iter_lines():
+                    agent._touch_activity("receiving stream response (raw httpx)")
+                    if line.startswith("event:"):
+                        current_event = line[6:].strip()
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+
+                    event_type = data.get("type") or current_event
+
+                    if event_type == "response.output_text.delta":
+                        delta = data.get("delta", "")
+                        if delta:
+                            collected_text_deltas.append(delta)
+                            agent._fire_stream_delta(delta)
+                    elif event_type == "response.output_item.done":
+                        item = data.get("item")
+                        if item is not None:
+                            collected_output_items.append(item)
+                    elif event_type in {
+                        "response.completed", "response.incomplete", "response.failed"
+                    }:
+                        final_response_data = data.get("response", data)
+                        break
+    except _httpx.ReadTimeout:
+        logger.warning("Codex raw httpx fallback timed out. %s", agent._client_log_context())
+    except Exception as exc:
+        logger.warning(
+            "Codex raw httpx fallback error: %s %s", exc, agent._client_log_context()
+        )
+        raise
+
+    # Build a SimpleNamespace response object matching what the transport expects
+    output = []
+    if collected_output_items:
+        for item in collected_output_items:
+            if isinstance(item, dict):
+                output.append(_dict_to_namespace(item))
+            else:
+                output.append(item)
+    elif collected_text_deltas:
+        assembled = "".join(collected_text_deltas)
+        output = [SimpleNamespace(
+            type="message", role="assistant", status="completed",
+            content=[SimpleNamespace(type="output_text", text=assembled)],
+        )]
+
+    status = "completed"
+    if isinstance(final_response_data, dict):
+        status = final_response_data.get("status", "completed")
+
+    result = SimpleNamespace(
+        output=output,
+        output_text="".join(collected_text_deltas) if collected_text_deltas else "",
+        status=status,
+        id=final_response_data.get("id") if isinstance(final_response_data, dict) else None,
+        usage=_dict_to_namespace(final_response_data.get("usage", {})) if isinstance(final_response_data, dict) else None,
+    )
+
+    if not output:
+        raise RuntimeError("Codex raw httpx fallback received no output items.")
+
+    return result
+
+
+def _dict_to_namespace(d):
+    """Recursively convert a dict to SimpleNamespace for SDK compatibility."""
+    if not isinstance(d, dict):
+        return d
+    ns = SimpleNamespace(**{
+        k: _dict_to_namespace(v) if isinstance(v, dict)
+        else [_dict_to_namespace(i) if isinstance(i, dict) else i for i in v] if isinstance(v, list)
+        else v
+        for k, v in d.items()
+    })
+    return ns
 
 
 __all__ = [
