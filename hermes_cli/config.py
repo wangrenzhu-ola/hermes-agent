@@ -923,10 +923,13 @@ DEFAULT_CONFIG = {
     #                    being clamped (default 2000).
     # - max_line_length: per-line cap applied when read_file emits a
     #                    line-numbered view (default 2000 chars).
+    # - context_safe_max_chars: final cap for any single tool-result message
+    #                    before it enters model context (default 12_000).
     "tool_output": {
         "max_bytes": 50_000,
         "max_lines": 2000,
         "max_line_length": 2000,
+        "context_safe_max_chars": 12_000,
     },
 
     # Tool loop guardrails nudge models when they repeat failed or
