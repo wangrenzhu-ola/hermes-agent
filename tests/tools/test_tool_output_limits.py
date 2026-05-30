@@ -45,6 +45,7 @@ class TestDefaults:
             "max_bytes": tol.DEFAULT_MAX_BYTES,
             "max_lines": tol.DEFAULT_MAX_LINES,
             "max_line_length": tol.DEFAULT_MAX_LINE_LENGTH,
+            "context_safe_max_chars": tol.DEFAULT_CONTEXT_SAFE_MAX_CHARS,
         }
 
     def test_get_limits_returns_defaults_when_config_not_a_dict(self):
@@ -63,12 +64,13 @@ class TestDefaults:
 
 
 class TestOverrides:
-    def test_user_config_overrides_all_three(self):
+    def test_user_config_overrides_all_limits(self):
         cfg = {
             "tool_output": {
                 "max_bytes": 100_000,
                 "max_lines": 5000,
                 "max_line_length": 4096,
+                "context_safe_max_chars": 12_345,
             }
         }
         with patch("hermes_cli.config.load_config", return_value=cfg):
@@ -77,6 +79,7 @@ class TestOverrides:
             "max_bytes": 100_000,
             "max_lines": 5000,
             "max_line_length": 4096,
+            "context_safe_max_chars": 12_345,
         }
 
     def test_partial_override_preserves_other_defaults(self):
@@ -118,12 +121,14 @@ class TestShortcuts:
                 "max_bytes": 111,
                 "max_lines": 222,
                 "max_line_length": 333,
+                "context_safe_max_chars": 444,
             }
         }
         with patch("hermes_cli.config.load_config", return_value=cfg):
             assert tol.get_max_bytes() == 111
             assert tol.get_max_lines() == 222
             assert tol.get_max_line_length() == 333
+            assert tol.get_context_safe_max_chars() == 444
 
 
 class TestDefaultConfigHasSection:
@@ -139,6 +144,7 @@ class TestDefaultConfigHasSection:
         assert section["max_bytes"] == tol.DEFAULT_MAX_BYTES
         assert section["max_lines"] == tol.DEFAULT_MAX_LINES
         assert section["max_line_length"] == tol.DEFAULT_MAX_LINE_LENGTH
+        assert section["context_safe_max_chars"] == tol.DEFAULT_CONTEXT_SAFE_MAX_CHARS
 
 
 class TestIntegrationReadPagination:
@@ -160,3 +166,44 @@ class TestIntegrationReadPagination:
         # Clamped to default MAX_LINES (2000).
         assert limit == tol.DEFAULT_MAX_LINES
         assert offset == 10
+
+
+class TestContextHygiene:
+    def test_redacts_huge_claude_prompt_argv_from_process_listing(self):
+        huge_prompt = "x" * 80_000
+        line = f"123 ?? claude -p {huge_prompt} --dangerously-skip-permissions"
+        redacted = tol.redact_prompt_argv(line)
+        assert len(redacted) < 1_000
+        assert "[REDACTED_PROMPT_ARG:" in redacted
+        assert huge_prompt[:100] not in redacted
+
+    def test_sanitize_context_text_middle_truncates_large_tool_output(self):
+        text = "HEAD" + ("x" * 50_000) + "TAIL"
+        sanitized = tol.sanitize_context_text(text, max_chars=2_000, notice="TEST TRUNCATED")
+        assert len(sanitized) <= 2_000
+        assert sanitized.startswith("HEAD")
+        assert sanitized.endswith("TAIL")
+        assert "TEST TRUNCATED" in sanitized
+
+    def test_middle_truncate_text_keeps_tiny_caps_strict(self):
+        sanitized = tol.middle_truncate_text("x" * 1_000, max_chars=10, notice="TEST TRUNCATED")
+        assert len(sanitized) <= 10
+        assert sanitized
+
+    def test_make_tool_result_message_caps_string_content_before_context_injection(self):
+        from agent.tool_dispatch_helpers import make_tool_result_message
+
+        huge = "A" * (tol.DEFAULT_CONTEXT_SAFE_MAX_CHARS + 20_000)
+        msg = make_tool_result_message("terminal", huge, "call_1")
+        assert len(msg["content"]) <= tol.DEFAULT_CONTEXT_SAFE_MAX_CHARS
+        assert "terminal TOOL RESULT TRUNCATED" in msg["content"]
+
+    def test_make_tool_result_message_redacts_prompt_argv_before_context_injection(self):
+        from agent.tool_dispatch_helpers import make_tool_result_message
+
+        huge_prompt = "secret-ish prompt " * 5_000
+        output = f"wang 1 0.0 claude -p {huge_prompt}\n"
+        msg = make_tool_result_message("terminal", output, "call_2")
+        assert len(msg["content"]) < 2_000
+        assert "[REDACTED_PROMPT_ARG:" in msg["content"]
+        assert "secret-ish prompt secret-ish prompt" not in msg["content"]
