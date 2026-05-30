@@ -333,6 +333,18 @@ def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict
     (content lists with image_url parts) pass through unwrapped so the
     list structure stays valid for vision-capable adapters.
     """
+    if isinstance(content, str):
+        from tools.tool_output_limits import sanitize_context_text
+        content = sanitize_context_text(content, notice=f"{name} TOOL RESULT TRUNCATED")
+    elif _is_multimodal_tool_result(content):
+        from tools.tool_output_limits import sanitize_context_text
+        if isinstance(content.get("text_summary"), str):
+            content = dict(content)
+            content["text_summary"] = sanitize_context_text(
+                content["text_summary"],
+                notice=f"{name} TOOL RESULT TRUNCATED",
+            )
+
     wrapped = _maybe_wrap_untrusted(name, content)
     return {
         "role": "tool",
