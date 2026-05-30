@@ -317,6 +317,60 @@ def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
     return msg
 
 
+def _sanitize_tool_result_for_context(name: str, value: Any) -> Any:
+    """Recursively sanitize text before a tool result enters model context.
+
+    Most built-in Hermes tools return JSON strings, but provider-native/MCP
+    bridges can hand back structured dict/list payloads such as
+    ``{"output": "..."}``. Sanitizing only the top-level string leaves those
+    nested text leaves able to leak oversized prompts when a later adapter
+    serializes the object. Preserve structure, but sanitize every string leaf.
+    """
+    from tools.tool_output_limits import sanitize_context_text
+
+    notice = f"{name} TOOL RESULT TRUNCATED"
+    if isinstance(value, str):
+        return sanitize_context_text(value, notice=notice)
+    if _is_multimodal_tool_result(value):
+        sanitized = dict(value)
+        if isinstance(sanitized.get("text_summary"), str):
+            sanitized["text_summary"] = sanitize_context_text(
+                sanitized["text_summary"],
+                notice=notice,
+            )
+        # Multimodal content may contain text parts alongside images. Sanitize
+        # only those text fields; never rewrite image blobs/URLs.
+        parts = []
+        for part in sanitized.get("content") or []:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                part = dict(part)
+                part["text"] = sanitize_context_text(part["text"], notice=notice)
+            parts.append(part)
+        if parts:
+            sanitized["content"] = parts
+        return sanitized
+    if isinstance(value, dict):
+        sanitized_dict = {}
+        changed = False
+        for k, v in value.items():
+            sanitized_value = _sanitize_tool_result_for_context(name, v)
+            sanitized_dict[k] = sanitized_value
+            changed = changed or sanitized_value is not v
+        return sanitized_dict if changed else value
+    if isinstance(value, list):
+        sanitized_list = []
+        changed = False
+        for item in value:
+            sanitized_item = _sanitize_tool_result_for_context(name, item)
+            sanitized_list.append(sanitized_item)
+            changed = changed or sanitized_item is not item
+        return sanitized_list if changed else value
+    if isinstance(value, tuple):
+        sanitized_tuple = tuple(_sanitize_tool_result_for_context(name, v) for v in value)
+        return sanitized_tuple if any(a is not b for a, b in zip(sanitized_tuple, value)) else value
+    return value
+
+
 def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict:
     """Build a tool-result message dict with both the OpenAI-format ``name``
     field (required by the wire format and provider adapters) and the internal
@@ -326,26 +380,17 @@ def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict
     ``mcp_*``) gets wrapped in semantic delimiters telling the model the content
     is untrusted data, not instructions.  This is the architectural defense
     against indirect prompt injection from poisoned web pages, GitHub issues,
-    and MCP responses — it changes how the model interprets the content rather
-    than relying on regex pattern matching catching every payload.
+    and MCP responses — it changes how the model interprets the content
+    rather than relying on regex pattern matching catching every payload.
 
     Wrapping only happens for plain string content.  Multimodal results
     (content lists with image_url parts) pass through unwrapped so the
     list structure stays valid for vision-capable adapters.
     """
-    if isinstance(content, str):
-        from tools.tool_output_limits import sanitize_context_text
-        content = sanitize_context_text(content, notice=f"{name} TOOL RESULT TRUNCATED")
-    elif _is_multimodal_tool_result(content):
-        from tools.tool_output_limits import sanitize_context_text
-        if isinstance(content.get("text_summary"), str):
-            content = dict(content)
-            content["text_summary"] = sanitize_context_text(
-                content["text_summary"],
-                notice=f"{name} TOOL RESULT TRUNCATED",
-            )
+    content = _sanitize_tool_result_for_context(name, content)
 
     wrapped = _maybe_wrap_untrusted(name, content)
+
     return {
         "role": "tool",
         "name": name,
