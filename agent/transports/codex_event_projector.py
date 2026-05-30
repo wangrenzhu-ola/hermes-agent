@@ -52,6 +52,18 @@ def _format_tool_args(d: dict) -> str:
     return json.dumps(d, ensure_ascii=False, sort_keys=True)
 
 
+def _sanitize_projected_tool_text(
+    text: str,
+    *,
+    max_chars: int | None = None,
+    notice: str = "CODEX TOOL RESULT TRUNCATED",
+) -> str:
+    """Sanitize Codex app-server tool output before Hermes stores/reuses it."""
+    from tools.tool_output_limits import sanitize_context_text
+
+    return sanitize_context_text(text, max_chars=max_chars, notice=notice)
+
+
 @dataclass
 class ProjectionResult:
     """Output of projecting one Codex item.
@@ -166,6 +178,10 @@ class CodexEventProjector:
         exit_code = item.get("exitCode")
         if exit_code is not None and exit_code != 0:
             output = f"[exit {exit_code}]\n{output}"
+        output = _sanitize_projected_tool_text(
+            output,
+            notice="CODEX COMMAND OUTPUT TRUNCATED",
+        )
         tool_msg = {
             "role": "tool",
             "tool_call_id": call_id,
@@ -241,9 +257,19 @@ class CodexEventProjector:
         result = item.get("result")
         error = item.get("error")
         if error:
-            content = f"[error] {json.dumps(error, ensure_ascii=False)[:1000]}"
+            raw_content = f"[error] {json.dumps(error, ensure_ascii=False)}"
+            content = _sanitize_projected_tool_text(
+                raw_content,
+                max_chars=4000,
+                notice="CODEX MCP TOOL RESULT TRUNCATED",
+            )
         elif result is not None:
-            content = json.dumps(result, ensure_ascii=False)[:4000]
+            raw_content = json.dumps(result, ensure_ascii=False)
+            content = _sanitize_projected_tool_text(
+                raw_content,
+                max_chars=4000,
+                notice="CODEX MCP TOOL RESULT TRUNCATED",
+            )
         else:
             content = ""
         tool_msg = {
@@ -282,7 +308,12 @@ class CodexEventProjector:
             self._pending_reasoning = []
         content_items = item.get("contentItems") or []
         if isinstance(content_items, list) and content_items:
-            content = json.dumps(content_items, ensure_ascii=False)[:4000]
+            raw_content = json.dumps(content_items, ensure_ascii=False)
+            content = _sanitize_projected_tool_text(
+                raw_content,
+                max_chars=4000,
+                notice="CODEX DYNAMIC TOOL RESULT TRUNCATED",
+            )
         else:
             success = item.get("success")
             content = f"success={success}"

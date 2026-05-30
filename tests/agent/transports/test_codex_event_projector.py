@@ -123,6 +123,21 @@ class TestCommandExecutionProjection:
         b = p2.project(COMMAND_EXEC_COMPLETED).messages
         assert a[0]["tool_calls"][0]["id"] == b[0]["tool_calls"][0]["id"]
 
+    def test_command_output_redacts_huge_prompt_argv(self) -> None:
+        item = {
+            **COMMAND_EXEC_COMPLETED["params"]["item"],
+            "aggregatedOutput": "wang 123 0.0 claude -p " + ("X" * 30_000),
+            "exitCode": 0,
+        }
+        notif = {
+            "method": "item/completed",
+            "params": {**COMMAND_EXEC_COMPLETED["params"], "item": item},
+        }
+        content = CodexEventProjector().project(notif).messages[1]["content"]
+        assert len(content) < 1_000
+        assert "[REDACTED_PROMPT_ARG:" in content
+        assert "X" * 500 not in content
+
 
 class TestAgentMessageProjection:
     """assistant text → final_text + assistant message."""
@@ -223,6 +238,23 @@ class TestMcpToolCallProjection:
             {"method": "item/completed", "params": {"item": item}}
         ).messages
         assert "error" in msgs[1]["content"]
+
+    def test_mcp_result_redacts_huge_prompt_argv(self) -> None:
+        item = {
+            "type": "mcpToolCall",
+            "id": "m3",
+            "server": "hermes-tools",
+            "tool": "terminal",
+            "status": "completed",
+            "arguments": {},
+            "result": {"output": "wang 123 0.0 claude -p " + ("X" * 30_000)},
+            "error": None,
+        }
+        content = CodexEventProjector().project(
+            {"method": "item/completed", "params": {"item": item}}
+        ).messages[1]["content"]
+        assert "[REDACTED_PROMPT_ARG:" in content
+        assert "X" * 500 not in content
 
 
 class TestUserAndOpaqueProjection:

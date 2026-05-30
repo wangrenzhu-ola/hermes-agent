@@ -207,3 +207,29 @@ class TestContextHygiene:
         assert len(msg["content"]) < 2_000
         assert "[REDACTED_PROMPT_ARG:" in msg["content"]
         assert "secret-ish prompt secret-ish prompt" not in msg["content"]
+
+    def test_make_tool_result_message_redacts_nested_dict_output(self):
+        from agent.tool_dispatch_helpers import make_tool_result_message
+
+        output = "wang 123 0.0 claude -p " + ("X" * 30_000)
+        msg = make_tool_result_message(
+            "terminal",
+            {"output": output, "exit_code": 0, "nested": [{"stderr": output}]},
+            "call_3",
+        )
+        assert "[REDACTED_PROMPT_ARG:" in msg["content"]["output"]
+        assert "X" * 500 not in msg["content"]["output"]
+        assert "[REDACTED_PROMPT_ARG:" in msg["content"]["nested"][0]["stderr"]
+        assert "X" * 500 not in msg["content"]["nested"][0]["stderr"]
+
+    def test_terminal_tool_exact_context_hygiene_repro_is_redacted(self):
+        import json
+        from tools.terminal_tool import terminal_tool
+
+        command = "python3 - <<'PY'\nprint('wang 123 0.0 claude -p ' + 'X'*30000)\nPY"
+        result = json.loads(terminal_tool(command, timeout=30))
+        output = result["output"]
+        assert len(output) < 1_000
+        assert "[REDACTED_PROMPT_ARG:" in output
+        assert "X" * 500 not in output
+        assert result["exit_code"] == 0
