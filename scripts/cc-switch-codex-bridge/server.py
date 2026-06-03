@@ -97,7 +97,7 @@ THINKING_SIGNATURE = "codex-bridge-placeholder:not-anthropic-origin"
 def _load_config() -> Dict[str, Any]:
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text())
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             return {}
     return {}
