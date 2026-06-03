@@ -2371,6 +2371,87 @@ class TestCodexAdapterReasoningTranslation:
         assert captured.get("reasoning") == {"effort": "medium", "summary": "auto"}
         assert captured.get("include") == ["reasoning.encrypted_content"]
 
+    def test_final_reasoning_summary_is_preserved_on_chat_message(self):
+        reasoning_item = SimpleNamespace(
+            type="reasoning",
+            summary=[SimpleNamespace(type="summary_text", text="final reasoning")],
+        )
+        message_item = SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text="done")],
+        )
+        events = [
+            SimpleNamespace(type="response.output_item.done", item=reasoning_item),
+            SimpleNamespace(type="response.output_item.done", item=message_item),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(
+                    status="completed",
+                    id="resp_test",
+                    usage=SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2),
+                ),
+            ),
+        ]
+
+        class _FakeStream:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def __iter__(self):
+                return iter(events)
+            def get_final_response(self):
+                return SimpleNamespace(
+                    status="completed",
+                    id="resp_test",
+                    output=[],
+                    usage=SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2),
+                )
+
+        real_client = MagicMock()
+        real_client.responses.stream = lambda **_kwargs: _FakeStream()
+        adapter = _CodexCompletionsAdapter(real_client, "gpt-5.5")
+
+        resp = adapter.create(messages=[{"role": "user", "content": "hi"}])
+
+        assert resp.choices[0].message.content == "done"
+        assert resp.choices[0].message.reasoning == "final reasoning"
+
+    def test_tool_messages_translate_to_responses_function_call_output(self):
+        adapter, captured = self._build_adapter()
+        adapter.create(
+            messages=[
+                {"role": "user", "content": "run pwd"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_pwd|fc_pwd",
+                            "type": "function",
+                            "function": {"name": "Bash", "arguments": '{"command":"pwd"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_pwd|fc_pwd", "content": "/repo"},
+            ]
+        )
+
+        assert captured["input"][1] == {
+            "type": "function_call",
+            "call_id": "call_pwd",
+            "name": "Bash",
+            "arguments": '{"command":"pwd"}',
+        }
+        assert captured["input"][2] == {
+            "type": "function_call_output",
+            "call_id": "call_pwd",
+            "output": "/repo",
+        }
+        assert all(item.get("role") != "tool" for item in captured["input"])
+
 
 class TestVisionAutoSkipsKimiCoding:
     """_resolve_auto vision branch skips providers that have no vision on

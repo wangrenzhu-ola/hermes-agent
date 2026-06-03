@@ -626,6 +626,44 @@ def _convert_content_for_responses(content: Any) -> Any:
     return converted or ""
 
 
+def _responses_call_id(raw_id: Any) -> str:
+    if not isinstance(raw_id, str):
+        return ""
+    call_id = raw_id.strip()
+    if "|" in call_id:
+        call_id = call_id.split("|", 1)[0].strip()
+    return call_id
+
+
+def _tool_output_for_responses(content: Any) -> Any:
+    if isinstance(content, list):
+        converted = _convert_content_for_responses(content)
+        return converted if isinstance(converted, list) else str(converted or "")
+    return str(content or "")
+
+
+def _responses_reasoning_summary_text(item: Any) -> str:
+    summary = getattr(item, "summary", None)
+    if summary is None and isinstance(item, dict):
+        summary = item.get("summary")
+    if isinstance(summary, list):
+        chunks: List[str] = []
+        for part in summary:
+            text = getattr(part, "text", None)
+            if text is None and isinstance(part, dict):
+                text = part.get("text")
+            if isinstance(text, str) and text:
+                chunks.append(text)
+            elif isinstance(part, str) and part:
+                chunks.append(part)
+        if chunks:
+            return "\n".join(chunks).strip()
+    text = getattr(item, "text", None)
+    if text is None and isinstance(item, dict):
+        text = item.get("text")
+    return text.strip() if isinstance(text, str) else ""
+
+
 class _CodexCompletionsAdapter:
     """Drop-in shim that accepts chat.completions.create() kwargs and
     routes them through the Codex Responses streaming API."""
@@ -648,6 +686,39 @@ class _CodexCompletionsAdapter:
             content = msg.get("content") or ""
             if role == "system":
                 instructions = content if isinstance(content, str) else str(content)
+            elif role == "tool":
+                call_id = _responses_call_id(msg.get("tool_call_id"))
+                if call_id:
+                    input_msgs.append({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": _tool_output_for_responses(content),
+                    })
+            elif role == "assistant" and isinstance(msg.get("tool_calls"), list):
+                if content:
+                    input_msgs.append({
+                        "role": "assistant",
+                        "content": _convert_content_for_responses(content),
+                    })
+                for tc in msg.get("tool_calls") or []:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                    name = fn.get("name")
+                    if not isinstance(name, str) or not name.strip():
+                        continue
+                    call_id = _responses_call_id(tc.get("id")) or f"call_{len(input_msgs)}"
+                    arguments = fn.get("arguments", "{}")
+                    if isinstance(arguments, dict):
+                        arguments = json.dumps(arguments, ensure_ascii=False)
+                    elif not isinstance(arguments, str):
+                        arguments = str(arguments)
+                    input_msgs.append({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name.strip(),
+                        "arguments": arguments.strip() or "{}",
+                    })
             else:
                 input_msgs.append({
                     "role": role,
@@ -739,6 +810,7 @@ class _CodexCompletionsAdapter:
 
         # Stream and collect the response
         text_parts: List[str] = []
+        reasoning_parts: List[str] = []
         tool_calls_raw: List[Any] = []
         usage = None
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
@@ -785,12 +857,15 @@ class _CodexCompletionsAdapter:
                 pass
 
         try:
-            # Collect output items and text deltas during streaming —
+            # Collect output items and text/reasoning deltas during streaming —
             # the Codex backend can return empty response.output from
             # get_final_response() even when items were streamed.
             collected_output_items: List[Any] = []
             collected_text_deltas: List[str] = []
+            collected_reasoning_deltas: List[str] = []
             has_function_calls = False
+            on_text_delta = kwargs.get("_on_text_delta")
+            on_reasoning_delta = kwargs.get("_on_reasoning_delta")
             if total_timeout:
                 timeout_timer = threading.Timer(float(total_timeout), _close_client_on_timeout)
                 timeout_timer.daemon = True
@@ -808,12 +883,20 @@ class _CodexCompletionsAdapter:
                         _delta = getattr(_event, "delta", "")
                         if _delta:
                             collected_text_deltas.append(_delta)
+                            if callable(on_text_delta):
+                                on_text_delta(_delta)
+                    elif "reasoning_summary_text.delta" in _etype or "reasoning.delta" in _etype:
+                        _delta = getattr(_event, "delta", "")
+                        if _delta:
+                            collected_reasoning_deltas.append(_delta)
+                            if callable(on_reasoning_delta):
+                                on_reasoning_delta(_delta)
                     elif "function_call" in _etype:
                         has_function_calls = True
                 _check_cancelled()
                 final = stream.get_final_response()
 
-            # Backfill empty output from collected stream events
+            # Backfill empty output from collected stream events.
             _output = getattr(final, "output", None)
             if isinstance(_output, list) and not _output:
                 if collected_output_items:
@@ -852,6 +935,10 @@ class _CodexCompletionsAdapter:
                         ptype = _item_get(part, "type")
                         if ptype in {"output_text", "text"}:
                             text_parts.append(_item_get(part, "text", ""))
+                elif item_type == "reasoning":
+                    reasoning_text = _responses_reasoning_summary_text(item)
+                    if reasoning_text:
+                        reasoning_parts.append(reasoning_text)
                 elif item_type == "function_call":
                     tool_calls_raw.append(SimpleNamespace(
                         id=_item_get(item, "call_id", ""),
@@ -885,6 +972,7 @@ class _CodexCompletionsAdapter:
             role="assistant",
             content=content,
             tool_calls=tool_calls_raw or None,
+            reasoning="\n\n".join(reasoning_parts).strip() if reasoning_parts else None,
         )
         choice = SimpleNamespace(
             index=0,
