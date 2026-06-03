@@ -1319,6 +1319,24 @@ def init_agent(
             )
             _config_context_length = None
 
+    if _config_context_length is not None and isinstance(_model_cfg, dict):
+        # model.context_length is an override for the configured default model,
+        # not a universal window for every runtime/session model.  Long-lived
+        # sessions can keep running on an older model (or users can switch
+        # models) after config.yaml changes default/model.context_length.  Do
+        # not let e.g. MiniMax-M3's 1M override leak into gpt-5.5/Codex status
+        # bars and compression budgets.
+        _configured_model = str(_model_cfg.get("default") or _model_cfg.get("model") or "").strip()
+        _active_model = str(getattr(agent, "model", "") or "").strip()
+        if _configured_model and _active_model and _configured_model.lower() != _active_model.lower():
+            _ra().logger.debug(
+                "Ignoring model.context_length=%r for active model %r because config default is %r",
+                _config_context_length,
+                _active_model,
+                _configured_model,
+            )
+            _config_context_length = None
+
     # Resolve custom_providers list once for reuse below (startup
     # context-length override and plugin context-engine init).
     try:
