@@ -814,6 +814,8 @@ class _CodexCompletionsAdapter:
                 final = _consume_codex_event_stream(
                     event_stream,
                     model=resp_kwargs.get("model"),
+                    on_text_delta=kwargs.get("_on_text_delta"),
+                    on_reasoning_delta=kwargs.get("_on_reasoning_delta"),
                     on_event=_on_each_event,
                 )
             finally:

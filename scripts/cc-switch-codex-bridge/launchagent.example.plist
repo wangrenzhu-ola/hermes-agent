@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.hermes.cc-switch-codex-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/hermes-agent/.venv/bin/python</string>
+    <string>/path/to/hermes-agent/scripts/cc-switch-codex-bridge/server.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/path/to/hermes-agent</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/REPLACE_ME</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>CODEX_ANTHROPIC_BRIDGE_CONFIG</key>
+    <string>/Users/REPLACE_ME/.hermes/cc-switch-codex-bridge/config.json</string>
+    <key>CODEX_ANTHROPIC_BRIDGE_EFFORT</key>
+    <string>medium</string>
+    <key>CODEX_ANTHROPIC_BRIDGE_TIMEOUT</key>
+    <string>180</string>
+    <key>CODEX_ANTHROPIC_BRIDGE_MAX_REQUEST_TIMEOUT</key>
+    <string>180</string>
+    <key>CODEX_ANTHROPIC_BRIDGE_MAX_RETRIES</key>
+    <string>2</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/REPLACE_ME/.hermes/logs/cc-switch-codex-bridge.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/REPLACE_ME/.hermes/logs/cc-switch-codex-bridge.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
