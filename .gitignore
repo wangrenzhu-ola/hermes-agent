@@ -117,3 +117,15 @@ scripts/out/
 # stores the published notes. They are not a build artifact and must never be
 # committed to the repo root. See the hermes-release skill.
 RELEASE_v*.md
+
+# Local AI-agent/operator artifacts. These are machine-specific state, generated
+# logs, or scratch output from Hermes/Claude/GitNexus/PMO runs and should not
+# pollute source checkouts.
+.claude/
+.context/
+.gitnexus/
+.hermes-pmo/
+artifacts/
+output/
+tmp_hermes_*.log
+*.bak-*
