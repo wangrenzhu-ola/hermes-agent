@@ -1001,6 +1001,24 @@ def build_skills_system_prompt(
     """
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
+    try:
+        from hermes_cli.config import load_config
+        _skills_cfg = (load_config().get("skills") or {})
+    except Exception:
+        _skills_cfg = {}
+    try:
+        _index_max_chars = int(_skills_cfg.get("index_max_chars", 12000) or 0)
+    except (TypeError, ValueError):
+        _index_max_chars = 12000
+    try:
+        _index_top_k = int(_skills_cfg.get("index_top_k", 120) or 0)
+    except (TypeError, ValueError):
+        _index_top_k = 120
+    _always_include = {
+        str(name).strip()
+        for name in (_skills_cfg.get("index_always_include") or ["hermes-agent"])
+        if str(name).strip()
+    }
 
     if not skills_dir.exists() and not external_dirs:
         return ""
@@ -1022,6 +1040,9 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        _index_max_chars,
+        _index_top_k,
+        tuple(sorted(_always_include)),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1159,22 +1180,45 @@ def build_skills_system_prompt(
         result = ""
     else:
         index_lines = []
+        emitted_skills = 0
+        total_skills = sum(len(v) for v in skills_by_category.values())
+        skipped_by_budget = 0
+        always_names = set(_always_include)
         for category in sorted(skills_by_category.keys()):
             cat_desc = category_descriptions.get(category, "")
-            if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
-            else:
-                index_lines.append(f"  {category}:")
+            category_header = f"  {category}: {cat_desc}" if cat_desc else f"  {category}:"
+            category_lines = [category_header]
             # Deduplicate and sort skills within each category
             seen = set()
             for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
                 if name in seen:
                     continue
                 seen.add(name)
+                is_always = name in always_names
+                if _index_top_k > 0 and emitted_skills >= _index_top_k and not is_always:
+                    skipped_by_budget += 1
+                    continue
                 if desc:
-                    index_lines.append(f"    - {name}: {desc}")
+                    line = f"    - {name}: {desc}"
                 else:
-                    index_lines.append(f"    - {name}")
+                    line = f"    - {name}"
+                projected = "\n".join(index_lines + category_lines + [line])
+                if (
+                    _index_max_chars > 0
+                    and len(projected) > _index_max_chars
+                    and not is_always
+                ):
+                    skipped_by_budget += 1
+                    continue
+                category_lines.append(line)
+                emitted_skills += 1
+            if len(category_lines) > 1:
+                index_lines.extend(category_lines)
+        if skipped_by_budget:
+            index_lines.append(
+                f"  [skills index budget: showing {emitted_skills}/{total_skills}; "
+                "use skills_list or skill_view(name) to load omitted skills.]"
+            )
 
         result = (
             "## Skills (mandatory)\n"
@@ -1204,6 +1248,37 @@ def build_skills_system_prompt(
             "\n"
             "Only proceed without loading a skill if genuinely none are relevant to the task."
         )
+        if _index_max_chars > 0 and len(result) > _index_max_chars:
+            try:
+                prefix, rest = result.split("<available_skills>\n", 1)
+                body, suffix = rest.split("</available_skills>\n", 1)
+                body_lines = body.splitlines()
+
+                def _rebuild(lines: list[str]) -> str:
+                    return (
+                        prefix
+                        + "<available_skills>\n"
+                        + "\n".join(lines)
+                        + "\n</available_skills>\n"
+                        + suffix
+                    )
+
+                while len(_rebuild(body_lines)) > _index_max_chars:
+                    remove_idx = None
+                    for i in range(len(body_lines) - 1, -1, -1):
+                        line = body_lines[i]
+                        if not line.startswith("    - "):
+                            continue
+                        name = line[6:].split(":", 1)[0].strip()
+                        if name not in _always_include:
+                            remove_idx = i
+                            break
+                    if remove_idx is None:
+                        break
+                    body_lines.pop(remove_idx)
+                result = _rebuild(body_lines)
+            except ValueError:
+                pass
 
     # ── Store in LRU cache ────────────────────────────────────────────
     with _SKILLS_PROMPT_CACHE_LOCK:

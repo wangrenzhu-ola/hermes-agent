@@ -494,6 +494,21 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
                     getattr(agent, "log_prefix", ""), exc,
                 )
 
+        try:
+            from hermes_cli.config import load_config as _load_context_policy_config
+            from agent.context_policy import direct_openai_responses_compaction_status
+
+            agent._last_responses_compaction_status = direct_openai_responses_compaction_status(
+                agent,
+                config=_load_context_policy_config(),
+            )
+        except Exception:
+            agent._last_responses_compaction_status = {
+                "enabled": False,
+                "applicable": False,
+                "reason": "policy_unavailable",
+            }
+
         return _ct.build_kwargs(
             model=agent.model,
             messages=_msgs_for_codex,

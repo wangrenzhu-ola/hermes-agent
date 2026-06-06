@@ -910,6 +910,18 @@ def init_agent(
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
     )
+    try:
+        from hermes_cli.config import load_config as _load_context_policy_config
+        from agent.context_policy import filter_progressive_tool_schemas
+
+        agent.tools = filter_progressive_tool_schemas(
+            agent.tools,
+            config=_load_context_policy_config(),
+            platform=platform or "",
+            enabled_toolsets=enabled_toolsets,
+        )
+    except Exception as exc:
+        logger.debug("Progressive tool schema filter skipped: %s", exc)
     
     # Show tool configuration and store valid tool names for validation
     agent.valid_tool_names = set()
