@@ -130,7 +130,7 @@ def base_progressive_toolsets(config: dict[str, Any] | None, platform: str) -> l
         return None
     if (
         has_explicit_platform_toolsets(config, platform)
-        and cfg.get("respect_explicit_platform_toolsets", False)
+        and cfg.get("respect_explicit_platform_toolsets", True)
     ):
         return None
     per_platform = cfg.get("base_toolsets_by_platform") or {}

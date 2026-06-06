@@ -8516,7 +8516,7 @@ class HermesCLI:
             print(
                 handle_context_command(
                     arg_text,
-                    default_platform=self.platform or "cli",
+                    default_platform=getattr(self, "platform", None) or "cli",
                 )
             )
         elif canonical == "insights":
