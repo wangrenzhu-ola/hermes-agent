@@ -265,6 +265,29 @@ class TestBuildSkillsSystemPrompt:
         assert "Debug Python scripts" in result
         assert "available_skills" in result
 
+    def test_skills_index_respects_top_k_and_always_include(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            "skills:\n"
+            "  index_top_k: 2\n"
+            "  index_max_chars: 10000\n"
+            "  index_always_include: [skill-4]\n"
+        )
+        for idx in range(5):
+            skill_dir = tmp_path / "skills" / "general" / f"skill-{idx}"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: skill-{idx}\ndescription: Skill {idx}\n---\n"
+            )
+
+        result = build_skills_system_prompt()
+
+        assert "skill-0" in result
+        assert "skill-1" in result
+        assert "skill-4" in result
+        assert "skill-3" not in result
+        assert "skills index budget" in result
+
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         cat_dir = tmp_path / "skills" / "tools"
@@ -1268,5 +1291,3 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-

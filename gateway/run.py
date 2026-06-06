@@ -8319,6 +8319,14 @@ class GatewayRunner:
         if canonical == "usage":
             return await self._handle_usage_command(event)
 
+        if canonical == "context":
+            from hermes_cli.prompt_size import handle_context_command
+            platform_key = _platform_config_key(event.source.platform)
+            return handle_context_command(
+                event.get_command_args().strip(),
+                default_platform=platform_key,
+            )
+
         if canonical == "insights":
             return await self._handle_insights_command(event)
 
@@ -12743,6 +12751,16 @@ class GatewayRunner:
 
             from hermes_cli.tools_config import _get_platform_tools
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            try:
+                from agent.context_policy import resolve_progressive_toolsets
+                enabled_toolsets = resolve_progressive_toolsets(
+                    user_config,
+                    platform_key,
+                    prompt,
+                    enabled_toolsets,
+                )
+            except Exception as exc:
+                logger.debug("Progressive toolset resolution skipped: %s", exc)
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
@@ -17146,6 +17164,16 @@ class GatewayRunner:
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        try:
+            from agent.context_policy import resolve_progressive_toolsets
+            enabled_toolsets = resolve_progressive_toolsets(
+                user_config,
+                platform_key,
+                message,
+                enabled_toolsets,
+            )
+        except Exception as exc:
+            logger.debug("Progressive toolset resolution skipped: %s", exc)
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 

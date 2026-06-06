@@ -142,6 +142,16 @@ def test_get_platform_tools_default_whatsapp_includes_web():
     assert "web" in enabled
 
 
+def test_get_platform_tools_default_weixin_uses_progressive_compact_set():
+    enabled = _get_platform_tools({}, "weixin")
+
+    assert "web" in enabled
+    assert "skills" in enabled
+    assert "terminal" not in enabled
+    assert "delegation" not in enabled
+    assert "cronjob" not in enabled
+
+
 def test_get_platform_tools_homeassistant_platform_keeps_homeassistant_toolset():
     enabled = _get_platform_tools({}, "homeassistant")
 
