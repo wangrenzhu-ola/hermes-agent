@@ -1,5 +1,6 @@
 from gateway.run import (
     _extract_gateway_display_reasoning,
+    _format_gateway_code_change_snippet,
     _format_gateway_reasoning_prefix,
 )
 
@@ -73,3 +74,56 @@ def test_format_gateway_reasoning_prefix_keeps_other_platform_reasoning_label():
 
     assert rendered.startswith("💭 **Reasoning:**")
     assert "reasoning" in rendered
+
+
+def test_format_gateway_code_change_snippet_diff_truncates_and_redacts():
+    diff = "\n".join(
+        [
+            "--- a/app.py",
+            "+++ b/app.py",
+            "@@",
+            "-old = 1",
+            "+api_key = sk-testsecret1234567890",
+            "+new = 2",
+            "+extra = 3",
+        ]
+    )
+
+    rendered = _format_gateway_code_change_snippet(
+        "patch",
+        {
+            "success": True,
+            "diff": diff,
+            "files_modified": ["app.py"],
+        },
+        max_lines=5,
+        max_chars=1000,
+    )
+
+    assert rendered.startswith("📝 代码变更\n- app.py\n```diff")
+    assert "[REDACTED]" in rendered
+    assert "extra = 3" not in rendered
+    assert "more lines" in rendered
+
+
+def test_format_gateway_code_change_snippet_write_file_summarizes_without_content():
+    rendered = _format_gateway_code_change_snippet(
+        "write_file",
+        {
+            "bytes_written": 123,
+            "files_modified": ["/tmp/app.py"],
+            "content": "full file content should not be shown",
+        },
+    )
+
+    assert rendered == "📝 文件已修改\n- /tmp/app.py\nBytes written: 123"
+
+
+def test_format_gateway_code_change_snippet_ignores_non_mutating_tools():
+    assert (
+        _format_gateway_code_change_snippet(
+            "read_file",
+            {"diff": "--- a\n+++ b\n"},
+        )
+        is None
+    )

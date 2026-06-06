@@ -35,6 +35,9 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     "tool_progress": "all",
     "show_reasoning": False,
     "tool_preview_length": 0,
+    "code_change_snippets": False,
+    "code_change_snippet_max_lines": 80,
+    "code_change_snippet_max_chars": 8000,
     "streaming": None,  # None = follow top-level streaming config
     # Gateway-only assistant/status chatter controls. These default on for
     # back-compat, but mobile platforms can opt down to final-answer-first.
@@ -61,6 +64,9 @@ _TIER_HIGH = {
     "tool_progress": "all",
     "show_reasoning": False,
     "tool_preview_length": 40,
+    "code_change_snippets": False,
+    "code_change_snippet_max_lines": 80,
+    "code_change_snippet_max_chars": 8000,
     "streaming": None,  # follow global
     "interim_assistant_messages": True,
     "long_running_notifications": True,
@@ -71,6 +77,9 @@ _TIER_MEDIUM = {
     "tool_progress": "new",
     "show_reasoning": False,
     "tool_preview_length": 40,
+    "code_change_snippets": False,
+    "code_change_snippet_max_lines": 80,
+    "code_change_snippet_max_chars": 8000,
     "streaming": None,
     "interim_assistant_messages": True,
     "long_running_notifications": True,
@@ -81,6 +90,9 @@ _TIER_LOW = {
     "tool_progress": "off",
     "show_reasoning": False,
     "tool_preview_length": 40,
+    "code_change_snippets": False,
+    "code_change_snippet_max_lines": 80,
+    "code_change_snippet_max_chars": 8000,
     "streaming": False,
     "interim_assistant_messages": False,
     "long_running_notifications": False,
@@ -91,6 +103,9 @@ _TIER_MINIMAL = {
     "tool_progress": "off",
     "show_reasoning": False,
     "tool_preview_length": 0,
+    "code_change_snippets": False,
+    "code_change_snippet_max_lines": 80,
+    "code_change_snippet_max_chars": 8000,
     "streaming": False,
     "interim_assistant_messages": False,
     "long_running_notifications": False,
@@ -263,6 +278,7 @@ def _normalise(setting: str, value: Any) -> Any:
         return str(value).lower()
     if setting in {
         "show_reasoning",
+        "code_change_snippets",
         "streaming",
         "interim_assistant_messages",
         "long_running_notifications",
@@ -275,7 +291,11 @@ def _normalise(setting: str, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower() in {"true", "1", "yes", "on"}
         return bool(value)
-    if setting == "tool_preview_length":
+    if setting in {
+        "tool_preview_length",
+        "code_change_snippet_max_lines",
+        "code_change_snippet_max_chars",
+    }:
         try:
             return int(value)
         except (TypeError, ValueError):

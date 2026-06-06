@@ -118,6 +118,58 @@ class TestResolveDisplaySetting:
             == "off"
         )
 
+    def test_code_change_snippet_settings_resolve_by_scope(self):
+        """Code-change snippets and limits use the same scoped resolver."""
+        from gateway.display_config import resolve_display_setting, resolve_display_setting_for_scope
+
+        assert resolve_display_setting({}, "feishu", "code_change_snippets") is False
+        assert resolve_display_setting({}, "feishu", "code_change_snippet_max_lines") == 80
+        assert resolve_display_setting({}, "feishu", "code_change_snippet_max_chars") == 8000
+
+        config = {
+            "display": {
+                "code_change_snippets": False,
+                "code_change_snippet_max_lines": 40,
+                "platforms": {
+                    "feishu": {
+                        "code_change_snippet_max_chars": "1200",
+                        "scopes": {
+                            "dm": {
+                                "code_change_snippets": "true",
+                                "code_change_snippet_max_lines": "12",
+                            },
+                            "group": {"code_change_snippets": False},
+                        },
+                    },
+                },
+            }
+        }
+
+        assert (
+            resolve_display_setting_for_scope(
+                config, "feishu", "code_change_snippets", scope="dm"
+            )
+            is True
+        )
+        assert (
+            resolve_display_setting_for_scope(
+                config, "feishu", "code_change_snippet_max_lines", scope="dm"
+            )
+            == 12
+        )
+        assert (
+            resolve_display_setting_for_scope(
+                config, "feishu", "code_change_snippet_max_chars", scope="dm"
+            )
+            == 1200
+        )
+        assert (
+            resolve_display_setting_for_scope(
+                config, "feishu", "code_change_snippets", scope="group"
+            )
+            is False
+        )
+
 
 # ---------------------------------------------------------------------------
 # Backward compatibility: tool_progress_overrides

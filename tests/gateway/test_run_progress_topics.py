@@ -466,6 +466,119 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
     assert adapter.edits[0]["message_id"] == "progress-1"
 
 
+@pytest.mark.asyncio
+async def test_run_agent_feishu_dm_emits_code_change_snippet_when_progress_enabled(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        CodeChangeCompletedAgent,
+        session_id="sess-feishu-dm-code-change",
+        platform=Platform.FEISHU,
+        chat_id="ou_user",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent
+    content = adapter.sent[0]["content"]
+    assert content.startswith("📝 代码变更")
+    assert "- gateway/run.py" in content
+    assert "```diff" in content
+    assert "+new" in content
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_dm_emits_fast_code_change_snippet_on_cancel_drain(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        FastCodeChangeCompletedAgent,
+        session_id="sess-feishu-dm-fast-code-change",
+        platform=Platform.FEISHU,
+        chat_id="ou_user",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    assert result["final_response"] == "done"
+    assert len(adapter.sent) == 1
+    assert adapter.edits == []
+    content = adapter.sent[0]["content"]
+    assert content.startswith("📝 代码变更")
+    assert "- gateway/run.py" in content
+    assert "```diff" in content
+    assert "+new" in content
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_dm_respects_code_change_snippet_disable(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        CodeChangeCompletedAgent,
+        session_id="sess-feishu-dm-code-change-disabled",
+        config_data={
+            "display": {
+                "platforms": {
+                    "feishu": {
+                        "scopes": {
+                            "dm": {
+                                "tool_progress": "verbose",
+                                "code_change_snippets": False,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        platform=Platform.FEISHU,
+        chat_id="ou_user",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent == []
+
+
+@pytest.mark.asyncio
+async def test_run_agent_code_change_snippet_skips_groups_and_non_mutating_tools(
+    monkeypatch, tmp_path
+):
+    group_adapter, group_result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        CodeChangeCompletedAgent,
+        session_id="sess-feishu-group-code-change",
+        platform=Platform.FEISHU,
+        chat_id="oc_chat",
+        chat_type="group",
+        thread_id=None,
+    )
+    assert group_result["final_response"] == "done"
+    assert group_adapter.sent == []
+
+    dm_adapter, dm_result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        NonMutatingCompletedAgent,
+        session_id="sess-feishu-dm-non-mutating",
+        platform=Platform.FEISHU,
+        chat_id="ou_user",
+        chat_type="dm",
+        thread_id=None,
+    )
+    assert dm_result["final_response"] == "done"
+    assert dm_adapter.sent == []
+
+
 # ---------------------------------------------------------------------------
 # Preview truncation tests (all/new mode respects tool_preview_length)
 # ---------------------------------------------------------------------------
@@ -672,6 +785,60 @@ class VerboseAgent:
             "messages": [],
             "api_calls": 1,
         }
+
+
+class CodeChangeCompletedAgent:
+    TOOL_NAME = "patch"
+    RESULT = {
+        "success": True,
+        "files_modified": ["gateway/run.py"],
+        "diff": "--- a/gateway/run.py\n+++ b/gateway/run.py\n@@\n-old\n+new\n",
+    }
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        assert self.tool_progress_callback is not None
+        self.tool_progress_callback(
+            "tool.completed",
+            self.TOOL_NAME,
+            None,
+            None,
+            duration=0.1,
+            is_error=False,
+            result=self.RESULT,
+        )
+        time.sleep(0.4)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class FastCodeChangeCompletedAgent(CodeChangeCompletedAgent):
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        assert self.tool_progress_callback is not None
+        self.tool_progress_callback(
+            "tool.completed",
+            self.TOOL_NAME,
+            None,
+            None,
+            duration=0.1,
+            is_error=False,
+            result=self.RESULT,
+        )
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class NonMutatingCompletedAgent(CodeChangeCompletedAgent):
+    TOOL_NAME = "read_file"
 
 
 async def _run_with_agent(

@@ -132,7 +132,9 @@ _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{20,}\b"),
+    re.compile(r"(?i)\b((?:api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?)[^'\"\s]{8,}"),
 )
+_CODE_CHANGE_SNIPPET_TOOL_NAMES = frozenset({"patch", "write_file", "skill_manage"})
 
 
 def _gateway_platform_value(platform: Any) -> str:
@@ -288,6 +290,141 @@ def _format_gateway_reasoning_prefix(platform_key: Any, reasoning: str) -> str:
 
     compact = compact.replace("```", "`\u200b``")
     return f"{label}\n```\n{compact}\n```"
+
+
+def _coerce_gateway_tool_result(result: Any) -> dict[str, Any]:
+    """Return a dict tool result when callbacks pass JSON strings or dicts."""
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        body = result.strip()
+        if not body:
+            return {}
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _compact_gateway_code_change_text(text: str, *, max_lines: int, max_chars: int) -> str:
+    """Redact and compact a code-change snippet for a persistent chat bubble."""
+    body = _redact_gateway_user_facing_secrets(str(text or "")).replace("```", "`\u200b``")
+    max_lines = max(1, int(max_lines or 80))
+    max_chars = max(1, int(max_chars or 8000))
+
+    lines = body.splitlines()
+    extra_lines = max(0, len(lines) - max_lines)
+    compact = "\n".join(lines[:max_lines]) if extra_lines else body
+    if len(compact) > max_chars:
+        compact = compact[:max_chars].rstrip()
+        compact += "\n... (truncated)"
+    elif extra_lines:
+        compact += f"\n... ({extra_lines} more lines)"
+    return compact
+
+
+def _gateway_code_change_files(payload: dict[str, Any]) -> list[str]:
+    """Extract file paths from common mutation-result fields."""
+    files: list[str] = []
+    for key in (
+        "files_modified",
+        "files_created",
+        "files_deleted",
+        "path",
+        "resolved_path",
+        "skill_md",
+    ):
+        value = payload.get(key)
+        if not value:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            candidates = value
+        else:
+            candidates = [value]
+        for item in candidates:
+            text = str(item or "").strip()
+            if text and text not in files:
+                files.append(text)
+    return files
+
+
+def _format_gateway_code_change_snippet(
+    tool_name: str,
+    result: Any,
+    *,
+    max_lines: int = 80,
+    max_chars: int = 8000,
+) -> Optional[str]:
+    """Format visible code-change evidence from completed mutating tools.
+
+    This is intentionally evidence-driven: no git snapshotting, no terminal
+    inference, and no full write_file content replay.
+    """
+    tool = str(tool_name or "").strip()
+    if tool not in _CODE_CHANGE_SNIPPET_TOOL_NAMES:
+        return None
+
+    payload = _coerce_gateway_tool_result(result)
+    if not payload or payload.get("error") or payload.get("success") is False:
+        return None
+
+    diff = payload.get("diff")
+    if isinstance(diff, str) and diff.strip():
+        files = _gateway_code_change_files(payload)
+        file_lines = "\n".join(f"- {path}" for path in files[:8])
+        if len(files) > 8:
+            file_lines += f"\n- ... ({len(files) - 8} more files)"
+        compact_diff = _compact_gateway_code_change_text(
+            diff,
+            max_lines=max_lines,
+            max_chars=max_chars,
+        )
+        header = "📝 代码变更"
+        if file_lines:
+            header += f"\n{file_lines}"
+        return f"{header}\n```diff\n{compact_diff}\n```"
+
+    files = _gateway_code_change_files(payload)
+    bytes_written = payload.get("bytes_written")
+    lint = payload.get("lint")
+    lsp = payload.get("lsp_diagnostics")
+    message = str(payload.get("message") or "").strip()
+
+    evidence_lines: list[str] = []
+    if files:
+        evidence_lines.extend(f"- {path}" for path in files[:8])
+        if len(files) > 8:
+            evidence_lines.append(f"- ... ({len(files) - 8} more files)")
+    if bytes_written is not None:
+        evidence_lines.append(f"Bytes written: {bytes_written}")
+    if lint:
+        lint_text = _compact_gateway_code_change_text(
+            json.dumps(lint, ensure_ascii=False, default=str)
+            if not isinstance(lint, str)
+            else lint,
+            max_lines=6,
+            max_chars=800,
+        )
+        evidence_lines.append(f"Lint: {lint_text}")
+    if lsp:
+        lsp_text = _compact_gateway_code_change_text(
+            str(lsp),
+            max_lines=6,
+            max_chars=800,
+        )
+        evidence_lines.append(f"LSP: {lsp_text}")
+
+    if not evidence_lines and tool == "skill_manage" and message:
+        lower_message = message.lower()
+        if any(marker in lower_message for marker in ("patched", "updated", "written")):
+            evidence_lines.append(_redact_gateway_user_facing_secrets(message))
+
+    if not evidence_lines:
+        return None
+
+    return "📝 文件已修改\n" + "\n".join(evidence_lines)
 
 
 def _gateway_provider_error_reply(text: str) -> str:
@@ -17155,6 +17292,67 @@ class GatewayRunner:
         # so each progress line would be sent as a separate message.
         from gateway.config import Platform
         tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
+        _scope_cfg = {}
+        if isinstance(_platform_cfg, dict) and _display_scope:
+            _scopes_cfg = _platform_cfg.get("scopes") or {}
+            if isinstance(_scopes_cfg, dict):
+                _candidate_scope_cfg = _scopes_cfg.get(_display_scope) or {}
+                if isinstance(_candidate_scope_cfg, dict):
+                    _scope_cfg = _candidate_scope_cfg
+
+        def _display_setting_configured(setting: str) -> bool:
+            return (
+                setting in _display_cfg
+                or (isinstance(_platform_cfg, dict) and setting in _platform_cfg)
+                or (isinstance(_scope_cfg, dict) and setting in _scope_cfg)
+            )
+
+        _code_change_configured = _display_setting_configured("code_change_snippets")
+        code_change_snippets_enabled = (
+            source.platform == Platform.FEISHU
+            and _display_scope == "dm"
+            and source.platform != Platform.WEBHOOK
+            and bool(
+                resolve_display_setting(
+                    user_config,
+                    platform_key,
+                    "code_change_snippets",
+                    False,
+                )
+            )
+        )
+        if (
+            not _code_change_configured
+            and source.platform == Platform.FEISHU
+            and _display_scope == "dm"
+        ):
+            # Compatibility path for existing Feishu DM installs: when DM tool
+            # progress is already visible, show landed code-change evidence too.
+            code_change_snippets_enabled = tool_progress_enabled
+        try:
+            code_change_snippet_max_lines = int(
+                resolve_display_setting(
+                    user_config,
+                    platform_key,
+                    "code_change_snippet_max_lines",
+                    80,
+                )
+                or 80
+            )
+        except Exception:
+            code_change_snippet_max_lines = 80
+        try:
+            code_change_snippet_max_chars = int(
+                resolve_display_setting(
+                    user_config,
+                    platform_key,
+                    "code_change_snippet_max_chars",
+                    8000,
+                )
+                or 8000
+            )
+        except Exception:
+            code_change_snippet_max_chars = 8000
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
@@ -17171,7 +17369,7 @@ class GatewayRunner:
         )
         
         # Queue for progress messages (thread-safe)
-        progress_queue = queue.Queue() if tool_progress_enabled else None
+        progress_queue = queue.Queue() if (tool_progress_enabled or code_change_snippets_enabled) else None
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
@@ -17291,13 +17489,28 @@ class GatewayRunner:
             if not progress_queue:
                 return
 
-            # First-touch onboarding: the first time a tool takes longer than
-            # _LONG_TOOL_THRESHOLD_S during a run that's streaming every tool
-            # (progress_mode == "all"), append a one-time hint suggesting
-            # /verbose.  We only fire when (a) the user hasn't seen the hint
-            # before and (b) /verbose is actually usable on this platform
-            # (gateway gate must be open).  The CLI has its own trigger.
-            if event_type == "tool.completed" and not long_tool_hint_fired[0]:
+            if event_type == "tool.completed":
+                if code_change_snippets_enabled:
+                    try:
+                        code_change_msg = _format_gateway_code_change_snippet(
+                            tool_name or "",
+                            kwargs.get("result"),
+                            max_lines=code_change_snippet_max_lines,
+                            max_chars=code_change_snippet_max_chars,
+                        )
+                        if code_change_msg:
+                            progress_queue.put(code_change_msg)
+                    except Exception as _snippet_err:
+                        logger.debug("code-change snippet formatting failed: %s", _snippet_err)
+
+                # First-touch onboarding: the first time a tool takes longer than
+                # _LONG_TOOL_THRESHOLD_S during a run that's streaming every tool
+                # (progress_mode == "all"), append a one-time hint suggesting
+                # /verbose.  We only fire when (a) the user hasn't seen the hint
+                # before and (b) /verbose is actually usable on this platform
+                # (gateway gate must be open).  The CLI has its own trigger.
+                if long_tool_hint_fired[0]:
+                    return
                 try:
                     duration = kwargs.get("duration") or 0
                     if duration >= _LONG_TOOL_THRESHOLD_S and progress_mode == "all":
@@ -17559,6 +17772,57 @@ class GatewayRunner:
                 progress_lines = groups[-1]
                 return True
 
+            async def _flush_progress_lines() -> None:
+                """Deliver the current progress buffer during final drain."""
+                nonlocal progress_msg_id
+                if not progress_lines or not can_edit:
+                    return
+                if await _roll_progress_overflow_if_needed():
+                    return
+
+                full_text = _progress_text(progress_lines)
+                if progress_msg_id is not None:
+                    await _edit_progress_message(progress_msg_id, full_text)
+                    return
+
+                result = await _send_progress_text(full_text)
+                if result.success and result.message_id:
+                    progress_msg_id = result.message_id
+
+            async def _drain_pending_progress() -> None:
+                """Drain queued progress when the progress task is being stopped."""
+                nonlocal progress_msg_id, progress_lines
+                while not progress_queue.empty():
+                    try:
+                        raw = progress_queue.get_nowait()
+                        if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
+                            _, base_msg, count = raw
+                            if progress_lines:
+                                progress_lines[-1] = f"{base_msg} (×{count + 1})"
+                                await _roll_progress_overflow_if_needed()
+                        elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
+                            # Content-bubble marker during drain: close off
+                            # the current progress bubble and start a fresh
+                            # one for any tool lines that arrived after.
+                            try:
+                                await _flush_progress_lines()
+                            except Exception:
+                                pass
+                            progress_msg_id = None
+                            progress_lines = []
+                            last_progress_msg[0] = None
+                            repeat_count[0] = 0
+                        else:
+                            progress_lines.append(raw)
+                            await _roll_progress_overflow_if_needed()
+                    except Exception:
+                        break
+
+                try:
+                    await _flush_progress_lines()
+                except Exception:
+                    pass
+
             while True:
                 try:
                     if not _run_still_current():
@@ -17704,46 +17968,13 @@ class GatewayRunner:
                         await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
 
                 except queue.Empty:
-                    await asyncio.sleep(0.3)
+                    try:
+                        await asyncio.sleep(0.3)
+                    except asyncio.CancelledError:
+                        await _drain_pending_progress()
+                        return
                 except asyncio.CancelledError:
-                    # Drain remaining queued messages
-                    while not progress_queue.empty():
-                        try:
-                            raw = progress_queue.get_nowait()
-                            if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
-                                _, base_msg, count = raw
-                                if progress_lines:
-                                    progress_lines[-1] = f"{base_msg} (×{count + 1})"
-                                    await _roll_progress_overflow_if_needed()
-                            elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
-                                # Content-bubble marker during drain: close off
-                                # the current progress bubble and start a fresh
-                                # one for any tool lines that arrived after.
-                                await _roll_progress_overflow_if_needed()
-                                if can_edit and progress_lines and progress_msg_id:
-                                    _pending_text = _progress_text(progress_lines)
-                                    try:
-                                        await _edit_progress_message(progress_msg_id, _pending_text)
-                                    except Exception:
-                                        pass
-                                progress_msg_id = None
-                                progress_lines = []
-                                last_progress_msg[0] = None
-                                repeat_count[0] = 0
-                            else:
-                                progress_lines.append(raw)
-                                await _roll_progress_overflow_if_needed()
-                        except Exception:
-                            break
-                    # Final edit with all remaining tools (only if editing works)
-                    if can_edit and progress_lines and progress_msg_id:
-                        await _roll_progress_overflow_if_needed()
-                    if can_edit and progress_lines and progress_msg_id:
-                        full_text = _progress_text(progress_lines)
-                        try:
-                            await _edit_progress_message(progress_msg_id, full_text)
-                        except Exception:
-                            pass
+                    await _drain_pending_progress()
                     return
                 except Exception as e:
                     logger.error("Progress message error: %s", e)
@@ -18732,15 +18963,19 @@ class GatewayRunner:
                 "model": _resolved_model,
                 "context_length": _context_length,
                 "session_id": effective_session_id,
-                "response_previewed": bool(_stream_consumer is not None and _want_stream_deltas and final_response),
+                "response_previewed": bool(
+                    result.get("response_previewed")
+                    or (_stream_consumer is not None and _want_stream_deltas and final_response)
+                ),
                 "response_transformed": result.get("response_transformed", False),
                 "reasoning_streamed_visible": bool(reasoning_streamed_visible[0]),
             }
         
-        # Start progress message sender if enabled
+        # Start progress message sender if any progress-like bubble can be queued.
         progress_task = None
-        if tool_progress_enabled:
+        if progress_queue is not None:
             progress_task = asyncio.create_task(send_progress_messages())
+            await asyncio.sleep(0)
 
         # Start stream consumer task — polls for consumer creation since it
         # happens inside run_sync (thread pool) after the agent is constructed.
