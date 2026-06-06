@@ -227,6 +227,69 @@ def _redact_gateway_user_facing_secrets(text: str) -> str:
     return redacted
 
 
+def _extract_gateway_display_reasoning(agent_result: Dict[str, Any]) -> Optional[str]:
+    """Return same-turn reasoning text suitable for user-visible display.
+
+    Some provider/gateway paths persist reasoning as a reasoning-only assistant
+    message instead of setting ``last_reasoning`` on the final result.  Recover
+    only from assistant messages after the latest user turn so an old turn's
+    thinking is never prepended to the current final answer.
+    """
+    if not isinstance(agent_result, dict):
+        return None
+
+    direct = str(agent_result.get("last_reasoning") or "").strip()
+    if direct:
+        return direct
+
+    messages = agent_result.get("messages") or []
+    if not isinstance(messages, list):
+        return None
+
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").lower()
+        if role == "user":
+            break
+        if role != "assistant":
+            continue
+        for key in ("reasoning", "reasoning_content"):
+            value = str(msg.get(key) or "").strip()
+            if value:
+                return value
+    return None
+
+
+def _format_gateway_reasoning_prefix(platform_key: Any, reasoning: str) -> str:
+    """Compact and redact reasoning before prepending it to a gateway reply."""
+    body = _redact_gateway_user_facing_secrets(str(reasoning or "").strip())
+    if not body:
+        return ""
+
+    key = str(getattr(platform_key, "value", platform_key) or "").lower()
+    if key in {"feishu", "weixin"}:
+        label = "🧠 **思考过程**"
+        max_lines = 12 if key == "feishu" else 8
+        max_chars = 1200 if key == "feishu" else 900
+    else:
+        label = "💭 **Reasoning:**"
+        max_lines = 15
+        max_chars = 1600
+
+    lines = body.splitlines()
+    extra_lines = max(0, len(lines) - max_lines)
+    compact = "\n".join(lines[:max_lines]) if extra_lines else body
+    if len(compact) > max_chars:
+        compact = compact[:max_chars].rstrip()
+        compact += "\n_... (truncated)_"
+    elif extra_lines:
+        compact += f"\n_... ({extra_lines} more lines)_"
+
+    compact = compact.replace("```", "`\u200b``")
+    return f"{label}\n```\n{compact}\n```"
+
+
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
     if _GATEWAY_AUTH_ERROR_RE.search(text):
@@ -9602,17 +9665,19 @@ class GatewayRunner:
                 )
             except Exception:
                 _show_reasoning_effective = getattr(self, "_show_reasoning", False)
-            if _show_reasoning_effective and response:
-                last_reasoning = agent_result.get("last_reasoning")
-                if last_reasoning:
-                    # Collapse long reasoning to keep messages readable
-                    lines = last_reasoning.strip().splitlines()
-                    if len(lines) > 15:
-                        display_reasoning = "\n".join(lines[:15])
-                        display_reasoning += f"\n_... ({len(lines) - 15} more lines)_"
-                    else:
-                        display_reasoning = last_reasoning.strip()
-                    response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
+            if _show_reasoning_effective and response and not agent_result.get("reasoning_streamed_visible"):
+                display_reasoning = _extract_gateway_display_reasoning(agent_result)
+                if display_reasoning:
+                    reasoning_prefix = _format_gateway_reasoning_prefix(
+                        _platform_config_key(source.platform), display_reasoning,
+                    )
+                    if reasoning_prefix:
+                        response = f"{reasoning_prefix}\n\n{response}"
+                        # Streaming may already have delivered the unprefixed
+                        # body.  Mark the result transformed so the downstream
+                        # streaming-suppression branch edits/sends the final
+                        # prefixed response instead of silently dropping it.
+                        agent_result["response_transformed"] = True
 
             # Runtime-metadata footer — only on the FINAL message of the turn.
             # Off by default (display.runtime_footer.enabled=false).  When
@@ -17083,6 +17148,7 @@ class GatewayRunner:
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
+        reasoning_streamed_visible = [False]  # Reasoning was emitted as a live platform bubble this turn
 
         # ── Discord voice "verbal ack before tool calls" ────────────────
         # When the bot is in a voice channel with the continuous mixer
@@ -17149,7 +17215,45 @@ class GatewayRunner:
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
-            if not progress_queue or not _run_still_current():
+            if not _run_still_current():
+                return
+
+            # Live reasoning display for editable Feishu streams.  This is
+            # independent from tool-progress visibility: Feishu may keep
+            # tool_progress off while still requesting reasoning streaming.
+            if event_type == "reasoning.available":
+                if not preview:
+                    return
+                try:
+                    _show_reasoning_live = bool(
+                        resolve_display_setting(
+                            user_config,
+                            platform_key,
+                            "show_reasoning",
+                            getattr(self, "_show_reasoning", False),
+                        )
+                    )
+                except Exception:
+                    _show_reasoning_live = bool(getattr(self, "_show_reasoning", False))
+                if not _show_reasoning_live or source.platform != Platform.FEISHU:
+                    return
+                try:
+                    _sc = stream_consumer_holder[0] if stream_consumer_holder else None
+                except Exception:
+                    _sc = None
+                if _sc is None:
+                    return
+                reasoning_prefix = _format_gateway_reasoning_prefix(platform_key, preview)
+                if not reasoning_prefix:
+                    return
+                try:
+                    _sc.on_commentary(reasoning_prefix)
+                    reasoning_streamed_visible[0] = True
+                except Exception as _reasoning_stream_err:
+                    logger.debug("Feishu reasoning commentary enqueue failed: %s", _reasoning_stream_err)
+                return
+
+            if not progress_queue:
                 return
 
             # First-touch onboarding: the first time a tool takes longer than
@@ -17181,8 +17285,7 @@ class GatewayRunner:
                     logger.debug("tool-progress onboarding hint failed: %s", _hint_err)
                 return
 
-
-            # Only act on tool.started events (ignore tool.completed, reasoning.available, etc.)
+            # Only act on tool.started events (ignore tool.completed, etc.)
             if event_type not in {"tool.started",}:
                 return
 
@@ -17934,7 +18037,11 @@ class GatewayRunner:
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
-            agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
+            agent.tool_progress_callback = (
+                progress_callback
+                if (tool_progress_enabled or source.platform == Platform.FEISHU)
+                else None
+            )
             # Discord voice verbal-ack hook (fires once per turn on first tool
             # call; armed only when in a voice channel with the mixer running).
             agent.tool_start_callback = (
@@ -18553,6 +18660,7 @@ class GatewayRunner:
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
                 "response_transformed": result.get("response_transformed", False),
+                "reasoning_streamed_visible": bool(reasoning_streamed_visible[0]),
             }
         
         # Start progress message sender if enabled
