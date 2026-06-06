@@ -92,6 +92,24 @@ async def test_gateway_stop_interrupts_running_agents_and_cancels_adapter_tasks(
 
 
 @pytest.mark.asyncio
+async def test_gateway_stop_times_out_stuck_adapter_teardown(monkeypatch):
+    runner, adapter = make_restart_runner()
+    monkeypatch.setenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "0.01")
+
+    async def hang_forever():
+        await asyncio.Event().wait()
+
+    adapter.cancel_background_tasks = hang_forever
+    adapter.disconnect = hang_forever
+
+    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+        await asyncio.wait_for(runner.stop(), timeout=0.5)
+
+    assert runner.adapters == {}
+    assert runner._shutdown_event.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_drains_running_agents_before_disconnect():
     runner, adapter = make_restart_runner()
     disconnect_mock = AsyncMock()

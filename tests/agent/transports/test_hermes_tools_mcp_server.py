@@ -121,6 +121,37 @@ class TestMain:
         rc = m.main([])
         assert rc == 0
 
+    def test_main_returns_0_on_stdio_disconnect_group(self, monkeypatch):
+        import agent.transports.hermes_tools_mcp_server as m
+
+        class DisconnectingServer:
+            def run(self):
+                raise ExceptionGroup(
+                    "unhandled errors in a TaskGroup",
+                    [BrokenPipeError(32, "Broken pipe")],
+                )
+
+        monkeypatch.setattr(m, "_build_server", lambda: DisconnectingServer())
+        rc = m.main([])
+        assert rc == 0
+
+    def test_main_returns_1_on_mixed_exception_group(self, monkeypatch):
+        import agent.transports.hermes_tools_mcp_server as m
+
+        class CrashingServer:
+            def run(self):
+                raise ExceptionGroup(
+                    "unhandled errors in a TaskGroup",
+                    [
+                        BrokenPipeError(32, "Broken pipe"),
+                        RuntimeError("fatal"),
+                    ],
+                )
+
+        monkeypatch.setattr(m, "_build_server", lambda: CrashingServer())
+        rc = m.main([])
+        assert rc == 1
+
     def test_main_returns_1_on_runtime_error(self, monkeypatch):
         import agent.transports.hermes_tools_mcp_server as m
 

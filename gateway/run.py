@@ -6623,16 +6623,41 @@ class GatewayRunner:
 
             for platform, adapter in list(self.adapters.items()):
                 _adapter_started_at = time.monotonic()
+                _adapter_timeout = self._adapter_disconnect_timeout_secs()
                 try:
-                    await adapter.cancel_background_tasks()
+                    if _adapter_timeout <= 0:
+                        await adapter.cancel_background_tasks()
+                    else:
+                        await asyncio.wait_for(
+                            adapter.cancel_background_tasks(),
+                            timeout=_adapter_timeout,
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timed out after %.1fs while cancelling %s adapter background tasks; continuing shutdown",
+                        _adapter_timeout,
+                        platform.value,
+                    )
                 except Exception as e:
                     logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
                 try:
-                    await adapter.disconnect()
+                    if _adapter_timeout <= 0:
+                        await adapter.disconnect()
+                    else:
+                        await asyncio.wait_for(
+                            adapter.disconnect(),
+                            timeout=_adapter_timeout,
+                        )
                     logger.info(
                         "✓ %s disconnected (%.2fs)",
                         platform.value,
                         time.monotonic() - _adapter_started_at,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timed out after %.1fs while disconnecting %s adapter; continuing shutdown",
+                        _adapter_timeout,
+                        platform.value,
                     )
                 except Exception as e:
                     logger.error(
@@ -6760,9 +6785,9 @@ class GatewayRunner:
                 # KeepAlive.SuccessfulExit=false needs a non-zero exit to
                 # relaunch, so keep the old code on macOS.
                 self._exit_code = (
-                    GATEWAY_SERVICE_RESTART_EXIT_CODE
-                    if sys.platform == "darwin" or not os.environ.get("INVOCATION_ID")
-                    else 0
+                    0
+                    if os.environ.get("INVOCATION_ID")
+                    else GATEWAY_SERVICE_RESTART_EXIT_CODE
                 )
                 self._exit_reason = self._exit_reason or "Gateway restart requested"
 
@@ -19632,10 +19657,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     runner = GatewayRunner(config)
     
-    # Track whether an unexpected signal initiated the shutdown. When an
-    # unexpected SIGTERM kills the gateway, we exit non-zero so service
-    # managers can revive the process. Planned stop paths write a marker
-    # before signalling us so they can exit cleanly instead.
+    # Track whether a signal initiated the shutdown so the final log can
+    # distinguish signal-driven termination from in-band gateway commands.
     _signal_initiated_shutdown = False
 
     # Set up signal handlers
@@ -19872,20 +19895,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if runner.exit_code is not None:
         raise SystemExit(runner.exit_code)
 
-    # When an unexpected SIGTERM caused the shutdown and it wasn't a planned
-    # restart (/restart, /update, SIGUSR1), exit non-zero so systemd's
-    # Restart=on-failure revives the process.  This covers:
-    #   - hermes update killing the gateway mid-work
-    #   - External kill commands
-    #   - WSL2/container runtime sending unexpected signals
-    # `hermes gateway stop` and interactive Ctrl+C are handled above as
-    # planned stops and should not trigger service-manager revival.
+    # A completed signal-driven shutdown is clean termination. Restart paths
+    # that need a relaunch use runner.exit_code / _restart_via_service above;
+    # plain SIGTERM must not turn a drained gateway into a failure flap.
     if _signal_initiated_shutdown and not runner._restart_requested:
         logger.info(
-            "Exiting with code 1 (signal-initiated shutdown without restart "
-            "request) so systemd Restart=on-failure can revive the gateway."
+            "Exiting cleanly after signal-initiated shutdown without restart request."
         )
-        return False  # → sys.exit(1) in the caller
+        return True
 
     # Older restart paths may reach here without ``runner.exit_code`` set.
     # Keep the historical non-zero fallback for service-managed restarts.

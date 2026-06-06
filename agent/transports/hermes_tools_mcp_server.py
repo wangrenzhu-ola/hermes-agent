@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import sys
+import errno
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,19 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "kanban_unblock",
     "kanban_link",
 )
+
+
+def _is_stdio_disconnect(exc: BaseException) -> bool:
+    """Return True when an exception only means the MCP stdio peer is gone."""
+    if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+        return True
+    if isinstance(exc, OSError) and exc.errno in {errno.EPIPE, errno.ECONNRESET}:
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return bool(exc.exceptions) and all(
+            _is_stdio_disconnect(child) for child in exc.exceptions
+        )
+    return False
 
 
 def _build_server() -> Any:
@@ -223,6 +237,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     except KeyboardInterrupt:
         return 0
     except Exception as exc:
+        if _is_stdio_disconnect(exc):
+            logger.info("hermes-tools MCP stdio peer disconnected")
+            return 0
         logger.exception("hermes-tools MCP server crashed")
         sys.stderr.write(f"hermes-tools MCP server error: {exc}\n")
         return 1
