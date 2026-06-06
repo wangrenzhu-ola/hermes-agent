@@ -654,7 +654,31 @@ def run_conversation(
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
-            _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+            try:
+                from hermes_cli.config import load_config as _load_context_policy_config
+                from agent.context_policy import should_prefetch_memory
+
+                _context_policy_config = _load_context_policy_config()
+                _allow_memory_prefetch, _memory_gate_reason = should_prefetch_memory(
+                    _query,
+                    config=_context_policy_config,
+                    platform=getattr(agent, "platform", "") or "",
+                )
+            except Exception:
+                _allow_memory_prefetch, _memory_gate_reason = True, "policy_unavailable"
+            agent._last_memory_recall_gate = {
+                "allowed": _allow_memory_prefetch,
+                "reason": _memory_gate_reason,
+            }
+            if _allow_memory_prefetch:
+                _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+            else:
+                logger.info(
+                    "External memory recall skipped by gate (reason=%s, platform=%s, session=%s)",
+                    _memory_gate_reason,
+                    getattr(agent, "platform", "") or "",
+                    getattr(agent, "session_id", "") or "",
+                )
         except Exception:
             pass
 
@@ -860,6 +884,22 @@ def run_conversation(
             # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
+
+        try:
+            from hermes_cli.config import load_config as _load_context_policy_config
+            from agent.context_policy import prune_provider_replay_messages
+
+            api_messages, _replay_prune_stats = prune_provider_replay_messages(
+                api_messages,
+                config=_load_context_policy_config(),
+            )
+            agent._last_replay_prune_stats = {
+                "pruned_messages": _replay_prune_stats.pruned_messages,
+                "original_chars": _replay_prune_stats.original_chars,
+                "replay_chars": _replay_prune_stats.replay_chars,
+            }
+        except Exception as exc:
+            logger.debug("Provider replay pruning skipped: %s", exc)
 
         # Build the final system message: cached prompt + ephemeral system prompt.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
