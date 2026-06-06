@@ -635,11 +635,42 @@ class _CodexCompletionsAdapter:
             content = msg.get("content") or ""
             if role == "system":
                 instructions = content if isinstance(content, str) else str(content)
-            else:
+            elif role == "tool":
+                call_id = str(msg.get("tool_call_id") or "")
+                # The main agent stores a composite id (``call_id|item_id``)
+                # for OpenAI-compatible chat completions.  Responses expects
+                # the original ``call_id`` for function_call_output replay.
+                if "|" in call_id:
+                    call_id = call_id.split("|", 1)[0]
                 input_msgs.append({
-                    "role": role,
-                    "content": _convert_content_for_responses(content),
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": content if isinstance(content, str) else str(content),
                 })
+            else:
+                tool_calls = msg.get("tool_calls") or []
+                if role == "assistant" and tool_calls:
+                    if content:
+                        input_msgs.append({
+                            "role": role,
+                            "content": _convert_content_for_responses(content),
+                        })
+                    for tool_call in tool_calls:
+                        fn = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
+                        call_id = str(tool_call.get("id") or "") if isinstance(tool_call, dict) else ""
+                        if "|" in call_id:
+                            call_id = call_id.split("|", 1)[0]
+                        input_msgs.append({
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": fn.get("name", ""),
+                            "arguments": fn.get("arguments", "{}"),
+                        })
+                else:
+                    input_msgs.append({
+                        "role": role,
+                        "content": _convert_content_for_responses(content),
+                    })
 
         resp_kwargs: Dict[str, Any] = {
             "model": model,
@@ -769,9 +800,17 @@ class _CodexCompletionsAdapter:
                     _close_client_on_timeout()
                 raise TimeoutError(_timeout_message())
             try:
-                from tools.interrupt import is_interrupted
-                if is_interrupted():
+                # Keep this check hot-path safe for very small auxiliary
+                # timeouts.  A cold import of tools.interrupt can outlive the
+                # caller's timeout budget; use it only after it is already
+                # loaded by the interactive/runtime path.
+                import sys
+                interrupt_mod = sys.modules.get("tools.interrupt")
+                is_interrupted = getattr(interrupt_mod, "is_interrupted", None) if interrupt_mod else None
+                if callable(is_interrupted) and is_interrupted():
                     raise InterruptedError("Codex auxiliary Responses stream interrupted")
+            except TimeoutError:
+                raise
             except InterruptedError:
                 raise
             except Exception:
@@ -807,9 +846,50 @@ class _CodexCompletionsAdapter:
                 _check_cancelled()
 
             event_stream = self._client.responses.create(**stream_kwargs)
+
+            def _iter_events_with_deadline(source: Any):
+                if deadline is None:
+                    yield from source
+                    return
+
+                import queue as _queue
+
+                q: _queue.Queue = _queue.Queue()
+                sentinel = object()
+
+                def _worker() -> None:
+                    try:
+                        for ev in source:
+                            q.put(("event", ev))
+                    except BaseException as exc:
+                        q.put(("error", exc))
+                    finally:
+                        q.put(("done", sentinel))
+
+                threading.Thread(target=_worker, daemon=True).start()
+                while True:
+                    _check_cancelled()
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if remaining <= 0:
+                        if not timed_out.is_set():
+                            _close_client_on_timeout()
+                        raise TimeoutError(_timeout_message())
+                    try:
+                        kind, payload = q.get(timeout=remaining)
+                    except _queue.Empty:
+                        if not timed_out.is_set():
+                            _close_client_on_timeout()
+                        raise TimeoutError(_timeout_message())
+                    if kind == "event":
+                        yield payload
+                    elif kind == "error":
+                        raise payload
+                    else:
+                        return
+
             try:
                 final = _consume_codex_event_stream(
-                    event_stream,
+                    _iter_events_with_deadline(event_stream),
                     model=resp_kwargs.get("model"),
                     on_text_delta=kwargs.get("_on_text_delta"),
                     on_reasoning_delta=kwargs.get("_on_reasoning_delta"),
@@ -835,6 +915,8 @@ class _CodexCompletionsAdapter:
                     val = obj.get(key, default)
                 return val if val is not None else default
 
+            reasoning_parts: List[str] = []
+
             for item in (getattr(final, "output", None) or []):
                 item_type = _item_get(item, "type")
                 if item_type == "message":
@@ -842,6 +924,13 @@ class _CodexCompletionsAdapter:
                         ptype = _item_get(part, "type")
                         if ptype in {"output_text", "text"}:
                             text_parts.append(_item_get(part, "text", ""))
+                elif item_type == "reasoning":
+                    for part in (_item_get(item, "summary") or []):
+                        ptype = _item_get(part, "type")
+                        if ptype in {"summary_text", "text"}:
+                            text = _item_get(part, "text", "")
+                            if text:
+                                reasoning_parts.append(text)
                 elif item_type == "function_call":
                     tool_calls_raw.append(SimpleNamespace(
                         id=_item_get(item, "call_id", ""),
@@ -878,6 +967,7 @@ class _CodexCompletionsAdapter:
             role="assistant",
             content=content,
             tool_calls=tool_calls_raw or None,
+            reasoning="\n".join(reasoning_parts).strip() or None,
         )
         choice = SimpleNamespace(
             index=0,
