@@ -133,6 +133,49 @@ class TestFinalizeCapabilityGate:
         assert picky.edit_message.call_args[1]["finalize"] is True
 
 
+class TestLiveReasoningStream:
+    """Reasoning deltas should stream in an auxiliary bubble, not final answer."""
+
+    @pytest.mark.asyncio
+    async def test_reasoning_delta_stream_is_separate_from_answer_delivery(self):
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="reason_1"),
+            SimpleNamespace(success=True, message_id="answer_1"),
+        ])
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(
+            success=True, message_id="reason_1",
+        ))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(edit_interval=0.0, buffer_threshold=1, cursor="▉"),
+        )
+
+        task = asyncio.create_task(consumer.run())
+        consumer.on_reasoning_delta("checking ")
+        await asyncio.sleep(0.1)
+        consumer.on_reasoning_delta("repo")
+        consumer.finish_reasoning()
+        consumer.on_delta("Done")
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        first_send = adapter.send.call_args_list[0][1]["content"]
+        assert first_send.startswith("🧠 **思考过程**\nchecking")
+        assert first_send.endswith("▉")
+
+        reasoning_edits = [c[1]["content"] for c in adapter.edit_message.call_args_list]
+        assert "🧠 **思考过程**\nchecking repo" in reasoning_edits
+
+        final_send = adapter.send.call_args_list[-1][1]["content"]
+        assert final_send == "Done"
+        assert consumer.final_response_sent is True
+        assert consumer.final_content_delivered is True
+
+
 class TestEditMessageFinalizeSignature:
     """Every concrete platform adapter must accept the ``finalize`` kwarg.
 
