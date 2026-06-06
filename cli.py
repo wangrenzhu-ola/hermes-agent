@@ -9006,6 +9006,16 @@ class HermesCLI:
             self._manual_compress(cmd_original)
         elif canonical == "usage":
             self._show_usage()
+        elif canonical == "context":
+            from hermes_cli.prompt_size import handle_context_command
+            _parts = cmd_original.split(maxsplit=1)
+            arg_text = _parts[1] if len(_parts) > 1 else ""
+            print(
+                handle_context_command(
+                    arg_text,
+                    default_platform=getattr(self, "platform", None) or "cli",
+                )
+            )
         elif canonical == "insights":
             self._show_insights(cmd_original)
         elif canonical == "copy":

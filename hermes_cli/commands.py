@@ -203,6 +203,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("restart", "Gracefully restart the gateway after draining active runs", "Session",
                gateway_only=True),
     CommandDef("usage", "Show token usage and rate limits for the current session", "Info"),
+    CommandDef("context", "Show prompt context buckets and top schema costs", "Info",
+               args_hint="[list|detail|map] [--platform=name] [--json]",
+               subcommands=("list", "detail", "map")),
     CommandDef("insights", "Show usage insights and analytics", "Info",
                args_hint="[days]"),
     CommandDef("platforms", "Show gateway/messaging platform status", "Info",
@@ -1077,13 +1080,24 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
             continue
         _add(cmd.name, cmd.description, cmd.args_hint or "")
 
-    # Second pass: aliases.
+    # Second pass: aliases. Slack caps manifest slash commands at 50, so add
+    # the owner-facing shorthand aliases covered by native-slash parity tests
+    # before lower-priority aliases such as /tasks.
+    priority_aliases = ("reset", "bg", "btw", "q")
+    for wanted in priority_aliases:
+        for cmd in COMMAND_REGISTRY:
+            if not _is_gateway_available(cmd, overrides):
+                continue
+            if wanted in cmd.aliases:
+                _add(wanted, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
+                break
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
         for alias in cmd.aliases:
             # Skip aliases that only differ from canonical by case/punctuation
-            # normalization (already covered by _add dedup).
+            # normalization (already covered by _add dedup) or were already
+            # added in the priority alias pass.
             _add(alias, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
 
     # Third pass: plugin commands.

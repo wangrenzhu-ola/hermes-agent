@@ -1648,6 +1648,47 @@ DEFAULT_CONFIG = {
         "provider": "",
     },
 
+    # Context progressive disclosure -- keeps routine messaging/API turns from
+    # paying the full fixed prompt/tool-schema cost up front.
+    "context": {
+        "progressive_tools": {
+            "enabled": True,
+            "platforms": ["weixin", "feishu", "api_server"],
+            "respect_explicit_platform_toolsets": False,
+            "base_toolsets": [
+                "web", "vision", "image_gen", "memory", "session_search",
+                "skills", "clarify", "todo", "messaging",
+            ],
+            "base_toolsets_by_platform": {
+                "api_server": [
+                    "web", "vision", "image_gen", "memory", "session_search",
+                    "skills", "clarify", "todo",
+                ],
+            },
+            "intent_toolsets": {
+                "coding": ["terminal", "file", "code_execution", "delegation"],
+                "research": ["web", "browser"],
+                "enterprise": ["feishu_doc", "feishu_drive"],
+            },
+        },
+        "memory_recall_gate": {
+            "enabled": True,
+            "min_query_chars": 12,
+        },
+        "replay_pruning": {
+            "enabled": True,
+            "keep_recent_messages": 12,
+            "tool_output_threshold_chars": 8000,
+            "head_chars": 1200,
+            "tail_chars": 800,
+        },
+        "openai_responses_compaction": {
+            "enabled": False,
+            "threshold": 0.8,
+            "mode": "responses_compact_endpoint",
+        },
+    },
+
     # Subagent delegation — override the provider:model used by delegate_task
     # so child agents can run on a different (cheaper/faster) provider and model.
     # Uses the same runtime provider resolution as CLI/gateway startup, so all
@@ -1718,6 +1759,9 @@ DEFAULT_CONFIG = {
     # always goes to ~/.hermes/skills/.
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
+        "index_max_chars": 12000,
+        "index_top_k": 120,
+        "index_always_include": ["hermes-agent"],
         # Substitute ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID} in SKILL.md
         # content with the absolute skill directory and the active session id
         # before the agent sees it.  Lets skill authors reference bundled

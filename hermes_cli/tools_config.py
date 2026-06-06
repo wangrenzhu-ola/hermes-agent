@@ -1230,8 +1230,15 @@ def _get_platform_tools(
 
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
+    try:
+        from agent.context_policy import base_progressive_toolsets
+        progressive_defaults = base_progressive_toolsets(config, platform)
+    except Exception:
+        progressive_defaults = None
 
-    if toolset_names is None or not isinstance(toolset_names, list):
+    if progressive_defaults:
+        toolset_names = progressive_defaults
+    elif toolset_names is None or not isinstance(toolset_names, list):
         plat_info = PLATFORMS.get(platform)
         if plat_info:
             default_ts = plat_info["default_toolset"]

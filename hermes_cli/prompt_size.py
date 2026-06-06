@@ -1,153 +1,245 @@
-"""Prompt-size diagnostic: ``hermes prompt-size``.
-
-Reports a byte/char breakdown of the system prompt the agent would build for
-a fresh session — system prompt total, the ``<available_skills>`` index,
-memory + user profile, and tool-schema JSON. Lets users see where their fixed
-prompt budget goes (issue #34667) without parsing a saved session JSON by hand.
-
-The diagnostic builds a real inspection agent (so the numbers match what
-actually ships on the wire) but never makes a network call: it passes dummy
-credentials so ``AIAgent.__init__`` takes the direct-construction path, then
-calls ``build_system_prompt_parts`` / inspects ``agent.tools`` offline.
-"""
+"""Prompt-size observability for Hermes context progressive disclosure."""
 
 from __future__ import annotations
 
+import argparse
 import json
-import re
-from typing import Any, Dict, List, Tuple
-
-# The skills index is wrapped in this tag pair inside the stable tier.
-_SKILLS_BLOCK_RE = re.compile(r"<available_skills>.*?</available_skills>", re.DOTALL)
+from types import SimpleNamespace
+from typing import Any
 
 
-def _bytes(s: str) -> int:
-    return len(s.encode("utf-8"))
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False))
 
 
-def _build_inspection_agent(platform: str) -> Any:
-    """Construct an offline AIAgent for prompt inspection.
-
-    Dummy ``api_key`` + ``base_url`` force the direct-construction path in
-    ``run_agent.py`` (no provider auto-detection, no network). Toolsets and
-    platform come from the caller so the breakdown matches a real session.
-    """
-    from run_agent import AIAgent
-    from hermes_cli.config import load_config
-
-    cfg = load_config()
-    model_cfg = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
-    model = model_cfg.get("default") or model_cfg.get("model") or ""
-
-    return AIAgent(
-        model=model,
-        api_key="inspect-only",
-        base_url="https://openrouter.ai/api/v1",
-        quiet_mode=True,
-        save_trajectories=False,
-        platform=platform,
-    )
-
-
-def compute_prompt_breakdown(platform: str = "cli") -> Dict[str, Any]:
-    """Return a dict of prompt-size measurements for a fresh session.
-
-    Keys: ``system_prompt`` (chars/bytes), ``skills_index``, ``memory``,
-    ``user_profile``, ``tools`` (count + json bytes), and ``sections`` (a list
-    of (label, chars, bytes) for the three prompt tiers).
-    """
-    from agent.system_prompt import build_system_prompt, build_system_prompt_parts
-
-    agent = _build_inspection_agent(platform)
-
-    parts = build_system_prompt_parts(agent)
-    full = build_system_prompt(agent)
-
-    stable = parts.get("stable", "")
-    context = parts.get("context", "")
-    volatile = parts.get("volatile", "")
-
-    # Skills index — the <available_skills> block (the largest single block
-    # when many skills are installed). Measured inside the stable tier.
-    skills_match = _SKILLS_BLOCK_RE.search(stable)
-    skills_index = skills_match.group(0) if skills_match else ""
-
-    # Memory + user profile live in the volatile tier. We re-derive their
-    # blocks directly from the memory store so the numbers are attributable
-    # even though they're joined into ``volatile``.
-    memory_block = ""
-    user_block = ""
-    store = getattr(agent, "_memory_store", None)
-    if store is not None:
-        try:
-            if getattr(agent, "_memory_enabled", True):
-                memory_block = store.format_for_system_prompt("memory") or ""
-            if getattr(agent, "_user_profile_enabled", True):
-                user_block = store.format_for_system_prompt("user") or ""
-        except Exception:
-            pass
-
-    # Tool-schema JSON — the other half of the fixed per-call payload.
-    tools = getattr(agent, "tools", None) or []
-    tools_json = json.dumps(tools, ensure_ascii=False)
-
-    sections: List[Tuple[str, int, int]] = [
-        ("stable (identity/guidance/skills)", len(stable), _bytes(stable)),
-        ("context (AGENTS.md/cwd files)", len(context), _bytes(context)),
-        ("volatile (memory/profile/timestamp)", len(volatile), _bytes(volatile)),
-    ]
-
+def _history_buckets(history: list[dict[str, Any]] | None) -> dict[str, Any]:
+    history = history or []
+    tool_output_chars = 0
+    tool_messages = 0
+    for msg in history:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool":
+            tool_messages += 1
+            tool_output_chars += len(str(msg.get("content") or ""))
     return {
-        "platform": platform,
-        "model": getattr(agent, "model", "") or "",
-        "system_prompt": {"chars": len(full), "bytes": _bytes(full)},
-        "skills_index": {"chars": len(skills_index), "bytes": _bytes(skills_index)},
-        "memory": {"chars": len(memory_block), "bytes": _bytes(memory_block)},
-        "user_profile": {"chars": len(user_block), "bytes": _bytes(user_block)},
-        "tools": {"count": len(tools), "json_bytes": _bytes(tools_json)},
-        "sections": sections,
+        "chars": _json_size(history),
+        "messages": len(history),
+        "tool_messages": tool_messages,
+        "tool_output_chars": tool_output_chars,
     }
 
 
-def _fmt_kb(n: int) -> str:
-    return f"{n / 1024:.1f} KB"
+def compute_prompt_breakdown(
+    platform: str = "weixin",
+    *,
+    message: str = "hello",
+    history: list[dict[str, Any]] | None = None,
+    top_n: int = 10,
+    include_context_files: bool = False,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a bucketed prompt-size estimate for a fresh Hermes turn.
+
+    The function avoids provider initialization and network calls. It uses the
+    same platform toolset resolver, schema resolver, progressive-disclosure
+    filters, and system-prompt builder that runtime agent construction uses.
+    """
+    from hermes_cli.config import load_config
+    from hermes_cli.tools_config import _get_platform_tools
+    from model_tools import get_tool_definitions
+    from agent.context_policy import (
+        filter_progressive_tool_schemas,
+        resolve_progressive_toolsets,
+        should_prefetch_memory,
+        tool_schema_size,
+    )
+    from agent.prompt_builder import build_skills_system_prompt
+    from agent.system_prompt import build_system_prompt_parts
+
+    cfg = config if config is not None else load_config()
+    platform_key = (platform or "cli").strip().lower()
+    base_toolsets = sorted(_get_platform_tools(cfg, platform_key))
+    enabled_toolsets = resolve_progressive_toolsets(
+        cfg,
+        platform_key,
+        message,
+        base_toolsets,
+    )
+    tools = get_tool_definitions(enabled_toolsets=enabled_toolsets, quiet_mode=True)
+    tools = filter_progressive_tool_schemas(
+        tools,
+        config=cfg,
+        platform=platform_key,
+        enabled_toolsets=enabled_toolsets,
+    ) or []
+    valid = {t.get("function", {}).get("name", "") for t in tools}
+    avail_toolsets = set(enabled_toolsets)
+    skills_prompt = build_skills_system_prompt(
+        available_tools=valid,
+        available_toolsets=avail_toolsets,
+    )
+    agent = SimpleNamespace(
+        load_soul_identity=False,
+        skip_context_files=not include_context_files,
+        valid_tool_names=valid,
+        _kanban_worker_guidance=False,
+        _tool_use_enforcement=(cfg.get("agent") or {}).get(
+            "tool_use_enforcement",
+            "auto",
+        ),
+        model="gpt-5.5",
+        provider="openai",
+        platform=platform_key,
+        _memory_store=None,
+        _memory_enabled=True,
+        _user_profile_enabled=True,
+        _memory_manager=None,
+        pass_session_id=False,
+        session_id="prompt-size",
+        tools=tools,
+    )
+    parts = build_system_prompt_parts(agent)
+    stable_chars = len(parts["stable"])
+    skills_chars = len(skills_prompt)
+    system_stable_chars = (
+        stable_chars - skills_chars
+        if skills_prompt and skills_prompt in parts["stable"]
+        else stable_chars
+    )
+    tool_sizes = [
+        {
+            "name": t.get("function", {}).get("name", ""),
+            "chars": tool_schema_size(t),
+        }
+        for t in tools
+    ]
+    tool_sizes.sort(key=lambda item: item["chars"], reverse=True)
+    memory_allowed, memory_reason = should_prefetch_memory(
+        message,
+        config=cfg,
+        platform=platform_key,
+    )
+    buckets = {
+        "system_stable": {"chars": max(system_stable_chars, 0)},
+        "skills_index": {"chars": skills_chars},
+        "memory_user": {"chars": len(parts["volatile"])},
+        "enterprise_recall": {
+            "chars": 0,
+            "gate_allowed": memory_allowed,
+            "gate_reason": memory_reason,
+        },
+        "project_context_files": {"chars": len(parts["context"])},
+        "tool_schemas": {
+            "chars": _json_size(tools),
+            "count": len(tools),
+            "top": tool_sizes[:top_n],
+        },
+        "history_tool_outputs": _history_buckets(history),
+    }
+    return {
+        "platform": platform_key,
+        "message_preview": str(message or "")[:120],
+        "enabled_toolsets": enabled_toolsets,
+        "total_chars": sum(bucket.get("chars", 0) for bucket in buckets.values()),
+        "buckets": buckets,
+    }
 
 
-def render_breakdown(data: Dict[str, Any]) -> str:
-    """Render the breakdown as plain text suitable for a terminal."""
-    lines: List[str] = []
-    sp = data["system_prompt"]
-    lines.append(f"Prompt-size breakdown (platform={data['platform']}, model={data['model'] or 'unset'})")
-    lines.append("")
-    lines.append(f"  System prompt total : {sp['bytes']:>8,} B  ({_fmt_kb(sp['bytes'])}, {sp['chars']:,} chars)")
-    lines.append("")
-    lines.append("  Major blocks:")
-    si = data["skills_index"]
-    mem = data["memory"]
-    up = data["user_profile"]
-    lines.append(f"    skills index       : {si['bytes']:>8,} B  ({_fmt_kb(si['bytes'])})")
-    lines.append(f"    memory             : {mem['bytes']:>8,} B  ({_fmt_kb(mem['bytes'])})")
-    lines.append(f"    user profile       : {up['bytes']:>8,} B  ({_fmt_kb(up['bytes'])})")
-    lines.append("")
-    lines.append("  Prompt tiers:")
-    for label, chars, byts in data["sections"]:
-        lines.append(f"    {label:<36}: {byts:>8,} B  ({_fmt_kb(byts)})")
-    lines.append("")
-    tools = data["tools"]
-    lines.append(f"  Tool schemas         : {tools['json_bytes']:>8,} B  ({_fmt_kb(tools['json_bytes'])}, {tools['count']} tools)")
+def format_prompt_breakdown(
+    breakdown: dict[str, Any],
+    *,
+    mode: str = "list",
+    as_json: bool = False,
+) -> str:
+    if as_json:
+        return json.dumps(breakdown, ensure_ascii=False, indent=2)
+
+    buckets = breakdown.get("buckets") or {}
+    if mode == "map":
+        lines = [
+            (
+                f"context map for {breakdown.get('platform')} "
+                f"({breakdown.get('total_chars', 0):,} chars)"
+            ),
+            (
+                "system_stable -> skills_index -> memory_user -> "
+                "enterprise_recall -> project_context_files -> "
+                "tool_schemas -> history_tool_outputs"
+            ),
+        ]
+        return "\n".join(lines)
+
+    lines = [
+        (
+            f"context {mode} for {breakdown.get('platform')} "
+            f"({breakdown.get('total_chars', 0):,} chars)"
+        ),
+    ]
+    for name, data in buckets.items():
+        lines.append(f"- {name}: {int(data.get('chars', 0)):,} chars")
+        if mode == "detail" and name == "tool_schemas":
+            for item in data.get("top", []):
+                lines.append(f"  - {item['name']}: {item['chars']:,}")
+        if mode == "detail" and name == "enterprise_recall":
+            lines.append(
+                f"  - gate: {data.get('gate_reason')} "
+                f"({'allowed' if data.get('gate_allowed') else 'skipped'})"
+            )
     return "\n".join(lines)
 
 
+def handle_context_command(args: str = "", *, default_platform: str = "weixin") -> str:
+    tokens = [tok for tok in str(args or "").split() if tok]
+    mode = "list"
+    as_json = False
+    platform = default_platform
+    message = "hello"
+    for tok in tokens:
+        if tok in {"list", "detail", "map"}:
+            mode = tok
+        elif tok == "--json":
+            as_json = True
+        elif tok.startswith("--platform="):
+            platform = tok.split("=", 1)[1] or platform
+        elif tok.startswith("--message="):
+            message = tok.split("=", 1)[1]
+    breakdown = compute_prompt_breakdown(platform=platform, message=message)
+    return format_prompt_breakdown(breakdown, mode=mode, as_json=as_json)
+
+
+def render_breakdown(data: dict[str, Any]) -> str:
+    """Backward-compatible alias for older ``hermes prompt-size`` callers."""
+    return format_prompt_breakdown(data, mode="detail")
+
+
 def cmd_prompt_size(args: Any) -> None:
-    """Entry point for ``hermes prompt-size``."""
+    """Entry point for ``hermes prompt-size`` from hermes_cli.main."""
     platform = getattr(args, "platform", "cli") or "cli"
-    as_json = getattr(args, "json", False)
-    try:
-        data = compute_prompt_breakdown(platform)
-    except Exception as e:
-        print(f"Could not compute prompt-size breakdown: {e}")
-        return
+    message = getattr(args, "message", "hello") or "hello"
+    as_json = bool(getattr(args, "json", False))
+    breakdown = compute_prompt_breakdown(platform=platform, message=message)
     if as_json:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        print(format_prompt_breakdown(breakdown, as_json=True))
     else:
-        print(render_breakdown(data))
+        print(format_prompt_breakdown(breakdown, mode="detail"))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Inspect Hermes prompt-size buckets.")
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        default="list",
+        choices=("list", "detail", "map"),
+    )
+    parser.add_argument("--platform", default="weixin")
+    parser.add_argument("--message", default="hello")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    breakdown = compute_prompt_breakdown(platform=args.platform, message=args.message)
+    print(format_prompt_breakdown(breakdown, mode=args.mode, as_json=args.json))
+
+
+if __name__ == "__main__":
+    main()
