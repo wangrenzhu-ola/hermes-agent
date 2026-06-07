@@ -265,7 +265,7 @@ def build_memory_recall_audit_line(raw_context: str, *, include_empty: bool = Fa
     first = first_match.group(1) if first_match else text
 
     def _field(name: str) -> str:
-        m = re.search(rf"(?:^|\|)\s*{re.escape(name)}:\s*([^|\n]+)", first)
+        m = re.search(rf"(?m)(?:^|\|)\s*{re.escape(name)}:\s*([^|\n]+)", first)
         return m.group(1).strip() if m else ""
 
     backend = _field("backend") or "unknown"

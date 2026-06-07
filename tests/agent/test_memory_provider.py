@@ -825,6 +825,27 @@ secret recalled body that must not be copied
         assert "secret recalled body" not in line
         assert "<enterprise-memory>" not in line
 
+    def test_memory_recall_audit_line_accepts_multiline_metadata(self):
+        from agent.memory_manager import build_memory_recall_audit_line
+
+        raw = """<enterprise-memory>
+Recall Results (1):
+[1] title
+backend: provider_github_docs_lexical
+path: docs/test.md
+confidence: 0.91
+scope: ai_infra_enterprise_knowledge
+secret recalled body that must not be copied
+</enterprise-memory>"""
+
+        line = build_memory_recall_audit_line(raw, include_empty=True)
+        assert line == (
+            "记忆召回：1 hits；top backend=provider_github_docs_lexical；"
+            "top source=docs/test.md；confidence=0.91；scope=ai_infra_enterprise_knowledge"
+        )
+        assert "secret recalled body" not in line
+        assert "<enterprise-memory>" not in line
+
     def test_memory_recall_audit_line_can_report_empty(self):
         from agent.memory_manager import build_memory_recall_audit_line
 
