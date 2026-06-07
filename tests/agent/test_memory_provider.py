@@ -805,6 +805,63 @@ class TestMemoryContextFencing:
         assert "Alice" in combined[fence_start:fence_end]
         assert combined.index("weather") < fence_start
 
+    def test_memory_recall_audit_line_exposes_only_provenance(self):
+        from agent.memory_manager import build_memory_recall_audit_line
+
+        raw = """<enterprise-memory>
+Recall Results (5):
+
+[1] source: https://github.com/org/repo/blob/main/docs/a.md | scope: ai_infra_enterprise_knowledge | confidence: 1.38 | backend: provider_github_docs_lexical | path: docs/a.md
+secret recalled body that must not be copied
+---
+[2] source: https://github.com/org/repo/blob/main/docs/b.md | backend: provider_vector_sqlite | path: docs/b.md
+</enterprise-memory>"""
+
+        line = build_memory_recall_audit_line(raw)
+        assert line == (
+            "记忆召回：5 hits；top backend=provider_github_docs_lexical；"
+            "top source=docs/a.md；confidence=1.38；scope=ai_infra_enterprise_knowledge"
+        )
+        assert "secret recalled body" not in line
+        assert "<enterprise-memory>" not in line
+
+    def test_memory_recall_audit_line_accepts_multiline_metadata(self):
+        from agent.memory_manager import build_memory_recall_audit_line
+
+        raw = """<enterprise-memory>
+Recall Results (1):
+[1] title
+backend: provider_github_docs_lexical
+path: docs/test.md
+confidence: 0.91
+scope: ai_infra_enterprise_knowledge
+secret recalled body that must not be copied
+</enterprise-memory>"""
+
+        line = build_memory_recall_audit_line(raw, include_empty=True)
+        assert line == (
+            "记忆召回：1 hits；top backend=provider_github_docs_lexical；"
+            "top source=docs/test.md；confidence=0.91；scope=ai_infra_enterprise_knowledge"
+        )
+        assert "secret recalled body" not in line
+        assert "<enterprise-memory>" not in line
+
+    def test_memory_recall_audit_line_can_report_empty(self):
+        from agent.memory_manager import build_memory_recall_audit_line
+
+        assert build_memory_recall_audit_line("", include_empty=True) == "记忆召回：无"
+        assert build_memory_recall_audit_line("", include_empty=False) == ""
+
+    def test_conversation_loop_appends_memory_recall_audit_when_debug_enabled(self):
+        import inspect
+
+        from agent.conversation_loop import run_conversation
+
+        src = inspect.getsource(run_conversation)
+        assert 'HERMES_HKTMEMORY_VISIBLE_RECALL_DEBUG' in src
+        assert 'build_memory_recall_audit_line(' in src
+        assert 'final_response.rstrip() + "\\n\\n" + _audit_line' in src
+
 
 # ---------------------------------------------------------------------------
 # AIAgent.commit_memory_session — routes to MemoryManager.on_session_end

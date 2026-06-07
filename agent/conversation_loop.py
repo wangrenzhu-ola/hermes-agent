@@ -33,7 +33,7 @@ from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
-from agent.memory_manager import build_memory_context_block
+from agent.memory_manager import build_memory_context_block, build_memory_recall_audit_line
 from agent.message_sanitization import (
     _repair_tool_call_arguments,
     _sanitize_messages_non_ascii,
@@ -4210,6 +4210,23 @@ def run_conversation(
                     break  # First non-empty string wins
         except Exception as exc:
             logger.warning("transform_llm_output hook failed: %s", exc)
+
+    # Optional user-visible memory recall audit.  The full recall block is
+    # hidden model input and is scrubbed from output by design; when the debug
+    # env is enabled, append a deterministic provenance summary so humans can
+    # evaluate recall quality without exposing the full memory context.
+    if final_response and not interrupted:
+        _recall_debug = os.getenv("HERMES_HKTMEMORY_VISIBLE_RECALL_DEBUG", "").strip().lower()
+        if _recall_debug and _recall_debug not in {"0", "false", "no", "off"}:
+            try:
+                _audit_line = build_memory_recall_audit_line(
+                    _ext_prefetch_cache,
+                    include_empty=True,
+                )
+                if _audit_line and "记忆召回：" not in final_response:
+                    final_response = final_response.rstrip() + "\n\n" + _audit_line
+            except Exception as exc:
+                logger.debug("memory recall audit footer failed: %s", exc)
 
     # Plugin hook: post_llm_call
     # Fired once per turn after the tool-calling loop completes.

@@ -241,6 +241,48 @@ def build_memory_context_block(raw_context: str) -> str:
     )
 
 
+def build_memory_recall_audit_line(raw_context: str, *, include_empty: bool = False) -> str:
+    """Return a compact user-visible recall audit line.
+
+    Memory prefetch context is intentionally injected as hidden
+    ``<memory-context>`` and scrubbed from model output.  For gateway/debug
+    surfaces that need human recall-quality inspection, expose only a
+    one-line provenance summary instead of leaking the full recalled body.
+    """
+    if not raw_context or not raw_context.strip():
+        return "记忆召回：无" if include_empty else ""
+
+    text = sanitize_context(raw_context)
+    match = re.search(r"Recall Results\s*\((\d+)\)", text, re.IGNORECASE)
+    if match:
+        hit_count = match.group(1)
+    else:
+        hit_count = str(len(re.findall(r"(?m)^\[\d+\]", text)))
+    if hit_count == "0" and not include_empty:
+        return ""
+
+    first_match = re.search(r"(?ms)^\[1\]\s*(.*?)(?:\n---\n|\Z)", text)
+    first = first_match.group(1) if first_match else text
+
+    def _field(name: str) -> str:
+        m = re.search(rf"(?m)(?:^|\|)\s*{re.escape(name)}:\s*([^|\n]+)", first)
+        return m.group(1).strip() if m else ""
+
+    backend = _field("backend") or "unknown"
+    scope = _field("scope")
+    confidence = _field("confidence")
+    source = _field("path") or _field("source_ref") or _field("source_url") or _field("source")
+
+    parts = [f"记忆召回：{hit_count} hits", f"top backend={backend}"]
+    if source:
+        parts.append(f"top source={source}")
+    if confidence:
+        parts.append(f"confidence={confidence}")
+    if scope:
+        parts.append(f"scope={scope}")
+    return "；".join(parts)
+
+
 class MemoryManager:
     """Orchestrates the built-in provider plus at most one external provider.
 
