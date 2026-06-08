@@ -2745,7 +2745,7 @@ class TestCodexAdapterReasoningTranslation:
                 )
 
         real_client = MagicMock()
-        real_client.responses.stream = lambda **_kwargs: _FakeStream()
+        real_client.responses.create = lambda **_kwargs: _FakeStream()
         adapter = _CodexCompletionsAdapter(real_client, "gpt-5.5")
 
         resp = adapter.create(messages=[{"role": "user", "content": "hi"}])
