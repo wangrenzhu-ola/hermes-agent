@@ -1044,6 +1044,39 @@ secret recalled body
         assert build_memory_recall_audit_line("", include_empty=True) == "记忆召回：无"
         assert build_memory_recall_audit_line("", include_empty=False) == ""
 
+    def test_memory_recall_audit_block_shows_layers_and_top_items(self):
+        from agent.memory_manager import build_memory_recall_audit_block
+
+        raw = """<enterprise-memory>
+Recall Results (3):
+
+[1] source: https://github.com/org/repo/blob/main/docs/a.md | scope: ai_infra_enterprise_knowledge | layer: L0-Abstract | confidence: 0.82 | backend: provider_github_docs_lexical | disclosure: safe_summary | path: docs/a.md
+A 包域名采购自动化的种子知识。
+---
+[2] source: local | layer: L1-Overview | confidence: 0.61 | backend: provider_vector_sqlite | path: L1-Overview/topics/app.md
+L1 overview excerpt should be visible.
+---
+[3] source: local | layer: L2-Full | confidence: 0.55 | backend: provider_vector_sqlite | path: L2-Full/app.md
+secret full body should not be shown when max_items=2.
+---
+</enterprise-memory>"""
+
+        block = build_memory_recall_audit_block(raw, max_items=2)
+
+        assert block.startswith("📚 **记忆召回**：3 hits（展示前 2）")
+        assert "1. L0-Abstract | conf=0.82 | safe_summary | provider_github_docs_lexical | docs/a.md" in block
+        assert "2. L1-Overview | conf=0.61 | provider_vector_sqlite | L1-Overview/topics/app.md" in block
+        assert "A 包域名采购自动化的种子知识" in block
+        assert "L1 overview excerpt" in block
+        assert "secret full body" not in block
+        assert "<enterprise-memory>" not in block
+
+    def test_memory_recall_audit_block_can_report_empty(self):
+        from agent.memory_manager import build_memory_recall_audit_block
+
+        assert build_memory_recall_audit_block("", include_empty=True) == "📚 **记忆召回**\n- 无"
+        assert build_memory_recall_audit_block("", include_empty=False) == ""
+
     def test_conversation_loop_appends_memory_recall_audit_when_debug_enabled(self):
         import inspect
 
@@ -1053,6 +1086,8 @@ secret recalled body
         assert 'HERMES_HKTMEMORY_VISIBLE_RECALL_DEBUG' in src
         assert 'sanitize_context(final_response)' in src
         assert 'build_memory_recall_audit_line(' in src
+        assert 'build_memory_recall_audit_block(' in src
+        assert 'memory_recall_audit' in src
         assert 'final_response.rstrip() + "\\n\\n" + _audit_line' in src
 
 

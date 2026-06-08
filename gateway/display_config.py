@@ -45,6 +45,10 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # deletion (e.g. Telegram). Off by default — progress is still shown
     # live, just cleaned up after success so the chat doesn't fill up with
     # stale breadcrumbs. Failed runs leave bubbles in place as breadcrumbs.
+    # Optional gateway-only recall quality audit.  Off by default because it
+    # exposes memory provenance to the user-visible chat.  When set to true or
+    # "summary", gateway replies prepend a compact L0/L1/L2 recall summary.
+    "visible_memory_recall": False,
     "cleanup_progress": False,
 }
 
@@ -232,6 +236,17 @@ def _normalise(setting: str, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower() in {"true", "1", "yes", "on"}
         return bool(value)
+    if setting == "visible_memory_recall":
+        if isinstance(value, bool):
+            return "summary" if value else "off"
+        text = str(value).strip().lower()
+        if text in {"true", "1", "yes", "on"}:
+            return "summary"
+        if text in {"false", "0", "no", "off", "none"}:
+            return "off"
+        if text in {"summary", "compact"}:
+            return "summary"
+        return "off"
     if setting == "tool_preview_length":
         try:
             return int(value)

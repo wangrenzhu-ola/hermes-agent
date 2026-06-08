@@ -303,6 +303,20 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     return redacted
 
 
+def _gateway_response_has_memory_recall_prefix(text: str) -> bool:
+    body = str(text or "").lstrip()
+    return body.startswith("📚 **记忆召回**") or body.startswith("记忆召回：")
+
+
+def _prepend_gateway_memory_recall_audit(response: str, audit: str) -> tuple[str, bool]:
+    if not response or not audit or _gateway_response_has_memory_recall_prefix(response):
+        return response, False
+    safe_audit = _redact_gateway_user_facing_secrets(str(audit).strip())
+    if not safe_audit:
+        return response, False
+    return f"{safe_audit}\n\n{response}", True
+
+
 def _extract_gateway_display_reasoning(agent_result: Dict[str, Any]) -> Optional[str]:
     """Return same-turn reasoning text suitable for the gateway display block.
 
@@ -9733,6 +9747,29 @@ class GatewayRunner:
                 if display_reasoning:
                     response = f"{display_reasoning}\n\n{response}"
 
+            # Optional visible memory recall audit.  Unlike the hidden
+            # <memory-context> block, this is deterministic gateway formatting:
+            # prepend compact L0/L1/L2 provenance so humans can judge recall
+            # quality before reading the model's answer.
+            try:
+                from gateway.display_config import resolve_display_setting as _rds_mem
+                _visible_memory_recall_mode = _rds_mem(
+                    _load_gateway_config(),
+                    _platform_config_key(source.platform),
+                    "visible_memory_recall",
+                    False,
+                )
+            except Exception:
+                _visible_memory_recall_mode = False
+            if response and _visible_memory_recall_mode not in {False, None, "", "off"}:
+                _memory_audit = agent_result.get("memory_recall_audit") or ""
+                response, _memory_recall_prepended = _prepend_gateway_memory_recall_audit(
+                    response,
+                    _memory_audit,
+                )
+                if _memory_recall_prepended:
+                    agent_result["response_transformed"] = True
+
             # Runtime-metadata footer — only on the FINAL message of the turn.
             # Off by default (display.runtime_footer.enabled=false).  When
             # streaming already delivered the body, we can't mutate the sent
@@ -18945,6 +18982,8 @@ class GatewayRunner:
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
                 "response_transformed": result.get("response_transformed", False),
+                "memory_recall_audit": result.get("memory_recall_audit", ""),
+                "memory_recall_audit_line": result.get("memory_recall_audit_line", ""),
             }
         
         # Start progress message sender if enabled
