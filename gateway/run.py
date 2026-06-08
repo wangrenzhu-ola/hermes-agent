@@ -303,6 +303,61 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     return redacted
 
 
+def _extract_gateway_display_reasoning(agent_result: Dict[str, Any]) -> Optional[str]:
+    """Return same-turn reasoning text suitable for the gateway display block.
+
+    The primary path is ``agent_result['last_reasoning']``.  Some gateway runs
+    persist reasoning-only assistant rows but return a final assistant message
+    with no reasoning attached, leaving ``last_reasoning`` empty by the time the
+    final message is formatted.  Fall back to scanning the returned message list
+    backwards within the current turn so platforms like Weixin can still display
+    the same reasoning block Feishu/CLI users expect.
+    """
+    direct = agent_result.get("last_reasoning") if isinstance(agent_result, dict) else None
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    messages = agent_result.get("messages") if isinstance(agent_result, dict) else None
+    if not isinstance(messages, list):
+        return None
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "user":
+            break
+        if msg.get("role") != "assistant":
+            continue
+        for key in ("reasoning", "reasoning_content"):
+            value = msg.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _format_gateway_reasoning_prefix(platform: Any, reasoning: str) -> str:
+    """Format a compact reasoning block for final gateway messages."""
+    text = _redact_gateway_user_facing_secrets(str(reasoning or "").strip())
+    if not text:
+        return ""
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if _gateway_platform_value(platform) == "weixin":
+        max_lines = 8
+        max_chars = 900
+        title = "🧠 **思考过程**"
+    else:
+        max_lines = 15
+        max_chars = 1800
+        title = "💭 **Reasoning:**"
+    clipped = "\n".join(lines[:max_lines])
+    clipped = clipped[:max_chars].rstrip()
+    omitted = max(0, len(lines) - max_lines)
+    if len("\n".join(lines[:max_lines])) > max_chars:
+        omitted += 1
+    if omitted:
+        clipped += f"\n_... ({omitted} more lines)_"
+    return f"{title}\n```\n{clipped}\n```"
+
+
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery."""
     text = str(message or "").strip()
@@ -9671,16 +9726,12 @@ class GatewayRunner:
             except Exception:
                 _show_reasoning_effective = getattr(self, "_show_reasoning", False)
             if _show_reasoning_effective and response:
-                last_reasoning = agent_result.get("last_reasoning")
-                if last_reasoning:
-                    # Collapse long reasoning to keep messages readable
-                    lines = last_reasoning.strip().splitlines()
-                    if len(lines) > 15:
-                        display_reasoning = "\n".join(lines[:15])
-                        display_reasoning += f"\n_... ({len(lines) - 15} more lines)_"
-                    else:
-                        display_reasoning = last_reasoning.strip()
-                    response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
+                display_reasoning = _format_gateway_reasoning_prefix(
+                    source.platform,
+                    _extract_gateway_display_reasoning(agent_result) or "",
+                )
+                if display_reasoning:
+                    response = f"{display_reasoning}\n\n{response}"
 
             # Runtime-metadata footer — only on the FINAL message of the turn.
             # Off by default (display.runtime_footer.enabled=false).  When
