@@ -170,6 +170,27 @@ class TestYAMLNormalisation:
         config = {"display": {"platforms": {"slack": {"tool_progress": False}}}}
         assert resolve_display_setting(config, "slack", "tool_progress") == "off"
 
+    def test_visible_memory_recall_bool_and_string_modes(self):
+        """Visible recall audit accepts bool/on/off/summary config values."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "feishu", "visible_memory_recall") is False
+        assert resolve_display_setting(
+            {"display": {"visible_memory_recall": True}},
+            "feishu",
+            "visible_memory_recall",
+        ) == "summary"
+        assert resolve_display_setting(
+            {"display": {"platforms": {"weixin": {"visible_memory_recall": "summary"}}}},
+            "weixin",
+            "visible_memory_recall",
+        ) == "summary"
+        assert resolve_display_setting(
+            {"display": {"platforms": {"weixin": {"visible_memory_recall": "off"}}}},
+            "weixin",
+            "visible_memory_recall",
+        ) == "off"
+
 
 # ---------------------------------------------------------------------------
 # Built-in platform defaults (tier system)
