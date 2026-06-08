@@ -17992,6 +17992,10 @@ class GatewayRunner:
             # Set up stream consumer for token streaming or interim commentary.
             _stream_consumer = None
             _stream_delta_cb = None
+            # Per-turn state shared by reasoning_delta and final-token callbacks.
+            # Feishu streams visible reasoning as its own edited message, then
+            # starts a fresh message for the final assistant answer.
+            _reasoning_stream_state = {"started": False, "final_started": False}
             _scfg = getattr(getattr(self, 'config', None), 'streaming', None)
             if _scfg is None:
                 from gateway.config import StreamingConfig
@@ -18065,8 +18069,20 @@ class GatewayRunner:
                         )
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
-                                if _run_still_current():
-                                    _stream_consumer.on_delta(text)
+                                if not _run_still_current():
+                                    return
+                                # If this turn already streamed a visible reasoning
+                                # segment, split the final answer into a fresh
+                                # platform message before the first assistant token.
+                                # Without the break, Feishu would append the final
+                                # answer to the live "💭 Reasoning" preview.
+                                try:
+                                    if _reasoning_stream_state["started"] and not _reasoning_stream_state["final_started"]:
+                                        _reasoning_stream_state["final_started"] = True
+                                        _stream_consumer.on_segment_break()
+                                except Exception:
+                                    pass
+                                _stream_consumer.on_delta(text)
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
@@ -18092,6 +18108,116 @@ class GatewayRunner:
                     logger=logger,
                     log_message="interim_assistant_callback scheduling error",
                 )
+
+            _show_reasoning_effective = bool(
+                resolve_display_setting(
+                    user_config,
+                    platform_key,
+                    "show_reasoning",
+                    getattr(self, "_show_reasoning", False),
+                )
+            )
+            _reasoning_checkpoint_state = {
+                "buffer": [],
+                "first_ts": 0.0,
+                "last_emit_ts": 0.0,
+                "count": 0,
+                "last_emit_len": 0,
+            }
+
+            def _reasoning_delta_cb(text: str) -> None:
+                """Surface provider reasoning summary deltas in gateway channels.
+
+                Feishu supports message editing, so it gets the closest CLI-like
+                experience: a live edited "Reasoning" segment, then a separate
+                final-answer segment. Weixin cannot edit messages, so it gets
+                paragraph-level checkpoint messages: non-overlapping reasoning
+                summary slices, rate-limited to avoid group spam and iLink rate
+                limits; the final answer still follows the normal post-run path.
+                """
+                if not _show_reasoning_effective or not text or not _run_still_current():
+                    return
+
+                # Feishu/Lark: live reasoning stream, edited in place.
+                if source.platform == Platform.FEISHU and _streaming_enabled and _stream_consumer is not None:
+                    try:
+                        if not _reasoning_stream_state["started"]:
+                            _reasoning_stream_state["started"] = True
+                            _stream_consumer.on_delta("💭 Reasoning:\n")
+                        _stream_consumer.on_delta(text)
+                    except Exception:
+                        pass
+                    return
+
+                # Weixin: no edit support, so send paragraph-level checkpoints.
+                # Avoid token-by-token spam: emit only a few non-overlapping
+                # reasoning paragraphs when enough new summary has accumulated.
+                if source.platform != Platform.WEIXIN or _status_adapter is None:
+                    return
+                try:
+                    now = time.monotonic()
+                    if not _reasoning_checkpoint_state["first_ts"]:
+                        _reasoning_checkpoint_state["first_ts"] = now
+                    _reasoning_checkpoint_state["buffer"].append(str(text))
+
+                    max_checkpoints = 4
+                    first_delay_seconds = 6.0
+                    min_interval_seconds = 18.0
+                    min_segment_chars = 90
+                    soft_segment_chars = 140
+                    hard_segment_chars = 260
+                    max_preview_chars = 420
+
+                    if _reasoning_checkpoint_state["count"] >= max_checkpoints:
+                        return
+
+                    raw = "".join(_reasoning_checkpoint_state["buffer"])
+                    collapsed = " ".join(raw.split())
+                    last_emit_len = int(_reasoning_checkpoint_state.get("last_emit_len") or 0)
+                    pending = collapsed[last_emit_len:].strip()
+                    if len(pending) < min_segment_chars:
+                        return
+
+                    count = int(_reasoning_checkpoint_state["count"])
+                    if count == 0:
+                        if now - _reasoning_checkpoint_state["first_ts"] < first_delay_seconds:
+                            return
+                    elif now - _reasoning_checkpoint_state["last_emit_ts"] < min_interval_seconds:
+                        return
+
+                    # Prefer natural paragraph/sentence boundaries, but do not
+                    # wait forever if the provider emits one long sentence.
+                    boundary_chars = ("。", "；", ";", "：", ":", ".", "!", "?", "！", "？")
+                    has_boundary = pending.endswith(boundary_chars)
+                    enough_for_segment = len(pending) >= soft_segment_chars or has_boundary
+                    if len(pending) < hard_segment_chars and not enough_for_segment:
+                        return
+
+                    preview = pending[:max_preview_chars]
+                    if len(pending) > max_preview_chars:
+                        preview = preview.rstrip() + "…"
+                    try:
+                        preview = _redact_gateway_user_facing_secrets(preview)
+                    except Exception:
+                        pass
+                    if not preview.strip():
+                        return
+
+                    _reasoning_checkpoint_state["last_emit_ts"] = now
+                    _reasoning_checkpoint_state["count"] = count + 1
+                    _reasoning_checkpoint_state["last_emit_len"] = len(collapsed)
+                    safe_schedule_threadsafe(
+                        _status_adapter.send(
+                            _status_chat_id,
+                            f"💭 思考中（{count + 1}）：\n{preview}",
+                            metadata=_status_thread_metadata,
+                        ),
+                        _loop_for_step,
+                        logger=logger,
+                        log_message="reasoning checkpoint scheduling error",
+                    )
+                except Exception:
+                    pass
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
 
@@ -18176,6 +18302,7 @@ class GatewayRunner:
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
+            setattr(agent, "reasoning_callback", _reasoning_delta_cb if _show_reasoning_effective else None)
             agent.status_callback = _status_callback_sync
 
             # Credits / out-of-band notices (usage bands, depletion, restored).

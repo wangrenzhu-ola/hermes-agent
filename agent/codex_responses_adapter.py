@@ -10,6 +10,8 @@ in and return transformed results.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -76,6 +78,41 @@ _TOOL_CALL_LEAK_PATTERN = re.compile(
 # Multimodal content helpers
 # ---------------------------------------------------------------------------
 
+_DATA_IMAGE_BASE64_RE = re.compile(
+    r"^data:image/[a-z0-9.+-]+(?:;[a-z0-9_.+-]+=[a-z0-9_.+-]+)*;base64,",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_responses_image_url(url: str) -> bool:
+    """Return True when ``url`` is safe to pass as a Responses image_url.
+
+    The Codex Responses endpoint validates base64 data URLs before the model
+    sees the turn. A malformed screenshot in a tool result (for example from a
+    0x0 desktop capture) otherwise poisons the whole conversation with a
+    non-retryable HTTP 400. Preserve valid http(s) and image data URLs, but
+    drop invalid data URLs during conversion/preflight so text evidence still
+    reaches the model.
+    """
+    if not isinstance(url, str):
+        return False
+    value = url.strip()
+    lowered = value.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return True
+    if not lowered.startswith("data:"):
+        return False
+    if not _DATA_IMAGE_BASE64_RE.match(value):
+        return False
+    _, _, payload = value.partition(",")
+    if not payload.strip():
+        return False
+    try:
+        base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return True
+
 def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> List[Dict[str, Any]]:
     """Convert chat-style multimodal content to Responses API input parts.
 
@@ -118,9 +155,10 @@ def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> Lis
                 detail = image_ref.get("detail", detail)
             else:
                 url = image_ref
-            if not isinstance(url, str) or not url:
+            if not isinstance(url, str) or not _is_valid_responses_image_url(url):
+                logger.warning("Dropping invalid Responses image_url while converting multimodal content")
                 continue
-            image_part: Dict[str, Any] = {"type": "input_image", "image_url": url}
+            image_part: Dict[str, Any] = {"type": "input_image", "image_url": url.strip()}
             if isinstance(detail, str) and detail.strip():
                 image_part["detail"] = detail.strip()
             converted.append(image_part)
@@ -610,12 +648,14 @@ def _preflight_codex_input_items(raw_items: Any) -> List[Dict[str, Any]]:
                             cleaned.append({"type": "input_text", "text": text})
                     elif ptype == "input_image":
                         url = part.get("image_url")
-                        if isinstance(url, str) and url:
-                            entry: Dict[str, Any] = {"type": "input_image", "image_url": url}
+                        if isinstance(url, str) and _is_valid_responses_image_url(url):
+                            entry: Dict[str, Any] = {"type": "input_image", "image_url": url.strip()}
                             detail = part.get("detail")
                             if isinstance(detail, str) and detail.strip():
                                 entry["detail"] = detail.strip()
                             cleaned.append(entry)
+                        elif isinstance(url, str) and url:
+                            logger.warning("Dropping invalid Responses image_url during input preflight")
                 normalized.append(
                     {
                         "type": "function_call_output",

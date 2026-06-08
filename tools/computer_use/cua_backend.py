@@ -493,7 +493,12 @@ class CuaDriverBackend(ComputerUseBackend):
         # Step 2: capture.
         png_b64: Optional[str] = None
         elements: List[UIElement] = []
-        width = height = 0
+        bounds = target.get("bounds") if isinstance(target, dict) else None
+        if isinstance(bounds, dict):
+            width = int(bounds.get("width") or 0)
+            height = int(bounds.get("height") or 0)
+        else:
+            width = height = 0
         window_title = ""
 
         if mode == "vision":
@@ -504,6 +509,10 @@ class CuaDriverBackend(ComputerUseBackend):
             )
             if sc_out["images"]:
                 png_b64 = sc_out["images"][0]
+            sc_text = sc_out["data"] if isinstance(sc_out["data"], str) else ""
+            m = re.search(r"(\d+)x(\d+)\s+(?:png|jpeg|jpg)", sc_text, re.IGNORECASE)
+            if m:
+                width, height = int(m.group(1)), int(m.group(2))
         else:
             # get_window_state: AX tree + optional screenshot.
             gws_out = self._session.call_tool(

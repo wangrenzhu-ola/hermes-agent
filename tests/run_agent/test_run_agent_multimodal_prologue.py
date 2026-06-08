@@ -14,7 +14,7 @@ function contracts at module scope.
 """
 
 from run_agent import _summarize_user_message_for_log
-from agent.codex_responses_adapter import _chat_content_to_responses_parts
+from agent.codex_responses_adapter import _chat_content_to_responses_parts, _preflight_codex_input_items
 
 
 class TestSummarizeUserMessageForLog:
@@ -102,3 +102,33 @@ class TestChatContentToResponsesParts:
     def test_empty_url_image_skipped(self):
         content = [{"type": "image_url", "image_url": {"url": ""}}]
         assert _chat_content_to_responses_parts(content) == []
+
+    def test_valid_data_image_url_preserved(self):
+        data_url = "data:image/png;base64,aW1nIGJ5dGVzIGhlcmU="
+        content = [{"type": "image_url", "image_url": {"url": data_url}}]
+        assert _chat_content_to_responses_parts(content) == [
+            {"type": "input_image", "image_url": data_url}
+        ]
+
+    def test_invalid_data_image_url_skipped_before_codex_400(self):
+        content = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,not base64!"}}]
+        assert _chat_content_to_responses_parts(content) == []
+
+    def test_function_call_output_preflight_drops_invalid_image_but_keeps_text(self):
+        normalized = _preflight_codex_input_items([
+            {
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {"type": "input_text", "text": "capture summary"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,"},
+                ],
+            }
+        ])
+        assert normalized == [
+            {
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [{"type": "input_text", "text": "capture summary"}],
+            }
+        ]
