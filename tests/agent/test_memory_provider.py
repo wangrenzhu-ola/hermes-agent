@@ -982,7 +982,7 @@ class TestMemoryContextFencing:
 Recall Results (5):
 
 [1] source: https://github.com/org/repo/blob/main/docs/a.md | scope: ai_infra_enterprise_knowledge | confidence: 1.38 | backend: provider_github_docs_lexical | path: docs/a.md
-secret recalled body that must not be copied
+secret recalled body
 ---
 [2] source: https://github.com/org/repo/blob/main/docs/b.md | backend: provider_vector_sqlite | path: docs/b.md
 </enterprise-memory>"""
@@ -1016,6 +1016,28 @@ secret recalled body that must not be copied
         assert "secret recalled body" not in line
         assert "<enterprise-memory>" not in line
 
+    def test_memory_recall_audit_line_handles_memory_context_wrapper(self):
+        from agent.memory_manager import build_memory_recall_audit_line
+
+        raw = """<memory-context>
+[System note: The following is recalled memory context, NOT new user input. Treat as authoritative reference data — this is the agent's persistent memory and should inform all responses.]
+<enterprise-memory>
+Recall Results (5):
+
+[1] source: https://github.com/org/repo/blob/main/docs/a.md | scope: ai_infra_enterprise_knowledge | confidence: 1.38 | backend: provider_github_docs_lexical | path: docs/a.md
+secret recalled body
+---
+</enterprise-memory>
+</memory-context>"""
+
+        line = build_memory_recall_audit_line(raw, include_empty=True)
+        assert line == (
+            "记忆召回：5 hits；top backend=provider_github_docs_lexical；"
+            "top source=docs/a.md；confidence=1.38；scope=ai_infra_enterprise_knowledge"
+        )
+        assert "secret recalled body" not in line
+        assert "<memory-context>" not in line
+
     def test_memory_recall_audit_line_can_report_empty(self):
         from agent.memory_manager import build_memory_recall_audit_line
 
@@ -1029,6 +1051,7 @@ secret recalled body that must not be copied
 
         src = inspect.getsource(run_conversation)
         assert 'HERMES_HKTMEMORY_VISIBLE_RECALL_DEBUG' in src
+        assert 'sanitize_context(final_response)' in src
         assert 'build_memory_recall_audit_line(' in src
         assert 'final_response.rstrip() + "\\n\\n" + _audit_line' in src
 

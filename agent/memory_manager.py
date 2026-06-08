@@ -252,7 +252,14 @@ def build_memory_recall_audit_line(raw_context: str, *, include_empty: bool = Fa
     if not raw_context or not raw_context.strip():
         return "记忆召回：无" if include_empty else ""
 
-    text = sanitize_context(raw_context)
+    # Do NOT call sanitize_context(raw_context) here: a valid provider block may
+    # be wrapped in <memory-context>...</memory-context>, and sanitize_context is
+    # intentionally designed to remove that whole hidden block from user-visible
+    # model output.  For the audit footer we need to parse provenance metadata
+    # from the hidden block, while still only returning a compact one-line
+    # summary below.
+    text = _INTERNAL_NOTE_RE.sub('', raw_context)
+    text = re.sub(r'</?\s*(?:memory-context|enterprise-memory)\s*>', '', text, flags=re.IGNORECASE)
     match = re.search(r"Recall Results\s*\((\d+)\)", text, re.IGNORECASE)
     if match:
         hit_count = match.group(1)

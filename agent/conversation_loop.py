@@ -31,7 +31,11 @@ from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
-from agent.memory_manager import build_memory_context_block, build_memory_recall_audit_line
+from agent.memory_manager import (
+    build_memory_context_block,
+    build_memory_recall_audit_line,
+    sanitize_context,
+)
 from agent.message_sanitization import (
     _repair_tool_call_arguments,
     _sanitize_messages_non_ascii,
@@ -4857,6 +4861,13 @@ def run_conversation(
         except Exception as exc:
             logger.warning("transform_llm_output hook failed: %s", exc)
 
+    # Final hard scrub: even if a model obeys a stale/debug instruction and
+    # copies hidden memory input verbatim, never let <memory-context> reach the
+    # user-visible response.  The optional footer below is the only supported
+    # recall-debug surface.
+    if final_response and not interrupted:
+        final_response = sanitize_context(final_response)
+
     # Optional user-visible memory recall audit.  The full recall block is
     # hidden model input and is scrubbed from output by design; when the debug
     # env is enabled, append a deterministic provenance summary so humans can
@@ -4869,7 +4880,7 @@ def run_conversation(
                     _ext_prefetch_cache,
                     include_empty=True,
                 )
-                if _audit_line and "记忆召回：" not in final_response:
+                if _audit_line and not re.search(r"(?m)^记忆召回：", final_response):
                     final_response = final_response.rstrip() + "\n\n" + _audit_line
             except Exception as exc:
                 logger.debug("memory recall audit footer failed: %s", exc)
