@@ -1080,12 +1080,12 @@ secret full body should not be shown when max_items=2.
         assert build_memory_recall_audit_block("", include_empty=True) == "📚 **记忆召回**\n- 无"
         assert build_memory_recall_audit_block("", include_empty=False) == ""
 
-    def test_conversation_loop_appends_memory_recall_audit_when_debug_enabled(self):
+    def test_turn_finalizer_appends_memory_recall_audit_when_debug_enabled(self):
         import inspect
 
-        from agent.conversation_loop import run_conversation
+        from agent.turn_finalizer import finalize_turn
 
-        src = inspect.getsource(run_conversation)
+        src = inspect.getsource(finalize_turn)
         assert 'HERMES_HKTMEMORY_VISIBLE_RECALL_DEBUG' in src
         assert 'sanitize_context(final_response)' in src
         assert 'build_memory_recall_audit_line(' in src
