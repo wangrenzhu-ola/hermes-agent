@@ -8525,12 +8525,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception:
                 _visible_memory_recall_mode = False
+            _memory_audit = ""
+            _memory_recall_prepended = False
             if response and _visible_memory_recall_mode not in {False, None, "", "off"}:
                 _memory_audit = agent_result.get("memory_recall_audit") or ""
-                response, _memory_recall_prepended = _prepend_gateway_memory_recall_audit(
-                    response,
-                    _memory_audit,
-                )
+                if not agent_result.get("already_sent"):
+                    response, _memory_recall_prepended = _prepend_gateway_memory_recall_audit(
+                        response,
+                        _memory_audit,
+                    )
+                # When gateway streaming already delivered the body, the normal
+                # final send is skipped below.  Keep the body untouched here and
+                # send the audit as a small trailing message in the already_sent
+                # branch, same pattern as the runtime footer.
                 if _memory_recall_prepended:
                     agent_result["response_transformed"] = True
 
@@ -8792,6 +8799,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         await self._deliver_media_from_response(
                             response, event, _media_adapter,
                         )
+                # Streaming already delivered the body text, but deterministic
+                # gateway-side metadata was intentionally held back because the
+                # body cannot be mutated after delivery. Send the memory recall
+                # audit as a small trailing message so Feishu/Weixin users can
+                # still see the L0/L1/L2 provenance for the turn.
+                if _memory_audit and not _gateway_response_has_memory_recall_prefix(response or ""):
+                    try:
+                        _mem_adapter = self.adapters.get(source.platform)
+                        if _mem_adapter:
+                            await _mem_adapter.send(
+                                source.chat_id,
+                                _redact_gateway_user_facing_secrets(str(_memory_audit).strip()),
+                                metadata=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
+                            )
+                    except Exception as _e:
+                        logger.debug("trailing memory recall audit send failed: %s", _e)
                 # Streaming already delivered the body text, but the footer was
                 # intentionally held back (see the `not already_sent` gate above).
                 # Send it now as a small trailing message so Telegram/Discord/etc.
