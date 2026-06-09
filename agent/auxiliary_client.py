@@ -637,92 +637,6 @@ def _pool_runtime_base_url(entry: Any, fallback: str = "") -> str:
 # calls to the Codex Responses API so callers don't need any changes.
 
 
-def _convert_content_for_responses(content: Any) -> Any:
-    """Convert chat.completions content to Responses API format.
-
-    chat.completions uses:
-      {"type": "text", "text": "..."}
-      {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
-
-    Responses API uses:
-      {"type": "input_text", "text": "..."}
-      {"type": "input_image", "image_url": "data:image/png;base64,..."}
-
-    If content is a plain string, it's returned as-is (the Responses API
-    accepts strings directly for text-only messages).
-    """
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return str(content) if content else ""
-
-    converted: List[Dict[str, Any]] = []
-    for part in content:
-        if not isinstance(part, dict):
-            continue
-        ptype = part.get("type", "")
-        if ptype == "text":
-            converted.append({"type": "input_text", "text": part.get("text", "")})
-        elif ptype == "image_url":
-            # chat.completions nests the URL: {"image_url": {"url": "..."}}
-            image_data = part.get("image_url", {})
-            url = image_data.get("url", "") if isinstance(image_data, dict) else str(image_data)
-            entry: Dict[str, Any] = {"type": "input_image", "image_url": url}
-            # Preserve detail if specified
-            detail = image_data.get("detail") if isinstance(image_data, dict) else None
-            if detail:
-                entry["detail"] = detail
-            converted.append(entry)
-        elif ptype in {"input_text", "input_image"}:
-            # Already in Responses format — pass through
-            converted.append(part)
-        else:
-            # Unknown content type — try to preserve as text
-            text = part.get("text", "")
-            if text:
-                converted.append({"type": "input_text", "text": text})
-
-    return converted or ""
-
-
-def _responses_call_id(raw_id: Any) -> str:
-    if not isinstance(raw_id, str):
-        return ""
-    call_id = raw_id.strip()
-    if "|" in call_id:
-        call_id = call_id.split("|", 1)[0].strip()
-    return call_id
-
-
-def _tool_output_for_responses(content: Any) -> Any:
-    if isinstance(content, list):
-        converted = _convert_content_for_responses(content)
-        return converted if isinstance(converted, list) else str(converted or "")
-    return str(content or "")
-
-
-def _responses_reasoning_summary_text(item: Any) -> str:
-    summary = getattr(item, "summary", None)
-    if summary is None and isinstance(item, dict):
-        summary = item.get("summary")
-    if isinstance(summary, list):
-        chunks: List[str] = []
-        for part in summary:
-            text = getattr(part, "text", None)
-            if text is None and isinstance(part, dict):
-                text = part.get("text")
-            if isinstance(text, str) and text:
-                chunks.append(text)
-            elif isinstance(part, str) and part:
-                chunks.append(part)
-        if chunks:
-            return "\n".join(chunks).strip()
-    text = getattr(item, "text", None)
-    if text is None and isinstance(item, dict):
-        text = item.get("text")
-    return text.strip() if isinstance(text, str) else ""
-
-
 class _CodexCompletionsAdapter:
     """Drop-in shim that accepts chat.completions.create() kwargs and
     routes them through the Codex Responses streaming API."""
@@ -735,59 +649,37 @@ class _CodexCompletionsAdapter:
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
 
-        # Separate system/instructions from conversation messages.
-        # Convert chat.completions multimodal content blocks to Responses
-        # API format (input_text / input_image instead of text / image_url).
+        # Separate system/instructions from replayable conversation messages,
+        # then route the rest through the SINGLE shared chat->Responses
+        # converter used by the main agent transport
+        # (agent/transports/codex.py). Maintaining a private conversion loop
+        # here let chat-style messages with role="tool" leak straight into
+        # Responses input[] — which the Responses API rejects with
+        # "Invalid value: 'tool'. Supported values are: 'assistant', 'system',
+        # 'developer', and 'user'." (issue #5709, hit hard by flush_memories()
+        # / compression replaying real session history that includes assistant
+        # tool_calls + role="tool" results). The shared converter encodes
+        # assistant tool calls as `function_call` items and tool results as
+        # `function_call_output` items with a valid call_id, so every
+        # Responses path normalizes tool history identically and cannot drift.
+        from agent.codex_responses_adapter import _chat_messages_to_responses_input
+
         instructions = "You are a helpful assistant."
-        input_msgs: List[Dict[str, Any]] = []
+        replay_messages: List[Dict[str, Any]] = []
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content") or ""
             if role == "system":
                 instructions = content if isinstance(content, str) else str(content)
-            elif role == "tool":
-                call_id = _responses_call_id(msg.get("tool_call_id"))
-                if call_id:
-                    input_msgs.append({
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": _tool_output_for_responses(content),
-                    })
-            elif role == "assistant" and isinstance(msg.get("tool_calls"), list):
-                if content:
-                    input_msgs.append({
-                        "role": "assistant",
-                        "content": _convert_content_for_responses(content),
-                    })
-                for tc in msg.get("tool_calls") or []:
-                    if not isinstance(tc, dict):
-                        continue
-                    fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
-                    name = fn.get("name")
-                    if not isinstance(name, str) or not name.strip():
-                        continue
-                    call_id = _responses_call_id(tc.get("id")) or f"call_{len(input_msgs)}"
-                    arguments = fn.get("arguments", "{}")
-                    if isinstance(arguments, dict):
-                        arguments = json.dumps(arguments, ensure_ascii=False)
-                    elif not isinstance(arguments, str):
-                        arguments = str(arguments)
-                    input_msgs.append({
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": name.strip(),
-                        "arguments": arguments.strip() or "{}",
-                    })
             else:
-                input_msgs.append({
-                    "role": role,
-                    "content": _convert_content_for_responses(content),
-                })
+                replay_messages.append(msg)
+
+        input_items = _chat_messages_to_responses_input(replay_messages)
 
         resp_kwargs: Dict[str, Any] = {
             "model": model,
             "instructions": instructions,
-            "input": input_msgs or [{"role": "user", "content": ""}],
+            "input": input_items or [{"role": "user", "content": ""}],
             "store": False,
         }
 
@@ -877,7 +769,6 @@ class _CodexCompletionsAdapter:
 
         # Stream and collect the response
         text_parts: List[str] = []
-        reasoning_parts: List[str] = []
         tool_calls_raw: List[Any] = []
         usage = None
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
@@ -950,16 +841,11 @@ class _CodexCompletionsAdapter:
                 # cadence the old in-line ``_check_cancelled()`` used.
                 _check_cancelled()
 
-            on_text_delta = kwargs.get("_on_text_delta")
-            on_reasoning_delta = kwargs.get("_on_reasoning_delta")
-
             event_stream = self._client.responses.create(**stream_kwargs)
             try:
                 final = _consume_codex_event_stream(
                     event_stream,
                     model=resp_kwargs.get("model"),
-                    on_text_delta=on_text_delta if callable(on_text_delta) else None,
-                    on_reasoning_delta=on_reasoning_delta if callable(on_reasoning_delta) else None,
                     on_event=_on_each_event,
                 )
             finally:
@@ -989,10 +875,6 @@ class _CodexCompletionsAdapter:
                         ptype = _item_get(part, "type")
                         if ptype in {"output_text", "text"}:
                             text_parts.append(_item_get(part, "text", ""))
-                elif item_type == "reasoning":
-                    reasoning_text = _responses_reasoning_summary_text(item)
-                    if reasoning_text:
-                        reasoning_parts.append(reasoning_text)
                 elif item_type == "function_call":
                     tool_calls_raw.append(SimpleNamespace(
                         id=_item_get(item, "call_id", ""),
@@ -1029,7 +911,6 @@ class _CodexCompletionsAdapter:
             role="assistant",
             content=content,
             tool_calls=tool_calls_raw or None,
-            reasoning="\n\n".join(reasoning_parts).strip() if reasoning_parts else None,
         )
         choice = SimpleNamespace(
             index=0,
@@ -2593,6 +2474,25 @@ def _is_connection_error(exc: Exception) -> bool:
     )):
         return True
     return False
+
+
+def _is_transient_transport_error(exc: Exception) -> bool:
+    """Return True for a one-off transport blip worth retrying ONCE on the
+    same provider before any provider/model fallback.
+
+    Covers connection/streaming-close errors (via the canonical
+    ``_is_connection_error`` detector, shared so the two cannot drift) plus a
+    pure 5xx/408 HTTP status. Deliberately narrow: this is the "retry the
+    same target once" gate, distinct from ``_is_payment_error`` /
+    ``_is_auth_error`` / ``_is_rate_limit_error`` which the except-chain
+    handles by switching provider, refreshing creds, or rotating the pool.
+    """
+    if _is_connection_error(exc):
+        return True
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    return isinstance(status, int) and (status == 408 or 500 <= status < 600)
 
 
 def _is_auth_error(exc: Exception) -> bool:
@@ -5266,8 +5166,28 @@ def call_llm(
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
     # then payment fallback.
     try:
-        return _validate_llm_response(
-            client.chat.completions.create(**kwargs), task)
+        # Retry ONCE on the same provider for a one-off transient transport
+        # blip (streaming-close / incomplete chunked read / 5xx / 408) before
+        # the except-chain below escalates to provider/model fallback. A
+        # single dropped connection shouldn't abandon an otherwise-healthy
+        # provider. A second failure (or any non-transient error) falls
+        # through to ``first_err`` and the existing fallback handling
+        # unchanged. This is the unified home for the transient retry that
+        # every auxiliary task (compression, memory flush, title-gen,
+        # session-search, vision) shares. (PR #16587)
+        try:
+            return _validate_llm_response(
+                client.chat.completions.create(**kwargs), task)
+        except Exception as transient_err:
+            if not _is_transient_transport_error(transient_err):
+                raise
+            logger.info(
+                "Auxiliary %s: transient transport error; retrying once on "
+                "the same provider before fallback: %s",
+                task or "call", transient_err,
+            )
+            return _validate_llm_response(
+                client.chat.completions.create(**kwargs), task)
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
@@ -5733,8 +5653,22 @@ async def async_call_llm(
         kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
 
     try:
-        return _validate_llm_response(
-            await client.chat.completions.create(**kwargs), task)
+        # Retry ONCE on the same provider for a transient transport blip
+        # before the except-chain escalates to fallback — see call_llm()
+        # for the rationale. (PR #16587)
+        try:
+            return _validate_llm_response(
+                await client.chat.completions.create(**kwargs), task)
+        except Exception as transient_err:
+            if not _is_transient_transport_error(transient_err):
+                raise
+            logger.info(
+                "Auxiliary %s (async): transient transport error; retrying "
+                "once on the same provider before fallback: %s",
+                task or "call", transient_err,
+            )
+            return _validate_llm_response(
+                await client.chat.completions.create(**kwargs), task)
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
