@@ -769,6 +769,7 @@ class _CodexCompletionsAdapter:
 
         # Stream and collect the response
         text_parts: List[str] = []
+        reasoning_parts: List[str] = []
         tool_calls_raw: List[Any] = []
         usage = None
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
@@ -875,6 +876,13 @@ class _CodexCompletionsAdapter:
                         ptype = _item_get(part, "type")
                         if ptype in {"output_text", "text"}:
                             text_parts.append(_item_get(part, "text", ""))
+                elif item_type == "reasoning":
+                    for part in (_item_get(item, "summary") or _item_get(item, "content") or []):
+                        ptype = _item_get(part, "type")
+                        if ptype in {"summary_text", "output_text", "text"}:
+                            text = _item_get(part, "text", "")
+                            if text:
+                                reasoning_parts.append(str(text))
                 elif item_type == "function_call":
                     tool_calls_raw.append(SimpleNamespace(
                         id=_item_get(item, "call_id", ""),
@@ -905,12 +913,14 @@ class _CodexCompletionsAdapter:
                 timeout_timer.cancel()
 
         content = "".join(text_parts).strip() or None
+        reasoning = "\n\n".join(part.strip() for part in reasoning_parts if part and part.strip()) or None
 
         # Build a response that looks like chat.completions
         message = SimpleNamespace(
             role="assistant",
             content=content,
             tool_calls=tool_calls_raw or None,
+            reasoning=reasoning,
         )
         choice = SimpleNamespace(
             index=0,
