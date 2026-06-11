@@ -308,6 +308,11 @@ def _gateway_response_has_memory_recall_prefix(text: str) -> bool:
     return body.startswith("📚 **记忆召回**") or body.startswith("记忆召回：")
 
 
+def _gateway_response_has_memory_write_footer(text: str) -> bool:
+    body = str(text or "")
+    return bool(re.search(r"(?m)^记忆写入：", body))
+
+
 def _prepend_gateway_memory_recall_audit(response: str, audit: str) -> tuple[str, bool]:
     if not response or not audit or _gateway_response_has_memory_recall_prefix(response):
         return response, False
@@ -8562,6 +8567,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _footer_line and response and not agent_result.get("already_sent"):
                 response = f"{response}\n\n{_footer_line}"
 
+            _memory_write_line = ""
+            try:
+                from gateway.display_config import resolve_display_setting as _rds_write
+                _visible_memory_write_mode = _rds_write(
+                    _load_gateway_config(),
+                    _platform_config_key(source.platform),
+                    "visible_memory_write",
+                    False,
+                )
+            except Exception:
+                _visible_memory_write_mode = False
+            if _visible_memory_write_mode not in {False, None, "", "off"}:
+                _memory_write_line = _redact_gateway_user_facing_secrets(
+                    str(agent_result.get("memory_write_audit_line") or "记忆写入：无").strip()
+                )
+            if (
+                _memory_write_line
+                and response
+                and not agent_result.get("already_sent")
+                and not _gateway_response_has_memory_write_footer(response)
+            ):
+                response = f"{response}\n\n{_memory_write_line}"
+
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
@@ -8830,6 +8858,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
+                if _memory_write_line and not _gateway_response_has_memory_write_footer(response or ""):
+                    try:
+                        _write_adapter = self.adapters.get(source.platform)
+                        if _write_adapter:
+                            await _write_adapter.send(
+                                source.chat_id,
+                                _memory_write_line,
+                                metadata=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
+                            )
+                    except Exception as _e:
+                        logger.debug("trailing memory write audit send failed: %s", _e)
                 return None
 
             return response
@@ -14616,6 +14655,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "response_transformed": result.get("response_transformed", False),
                 "memory_recall_audit": result.get("memory_recall_audit", ""),
                 "memory_recall_audit_line": result.get("memory_recall_audit_line", ""),
+                "memory_write_audit_line": result.get("memory_write_audit_line", ""),
             }
         
         # Start progress message sender if enabled

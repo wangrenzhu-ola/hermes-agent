@@ -1034,12 +1034,23 @@ class _AnthropicCompletionsAdapter:
             elif choice_type in {"auto", "required", "none"}:
                 normalized_tool_choice = choice_type
 
+        # Auxiliary calls carry provider-specific knobs through extra_body.
+        # Preserve extra_body.reasoning for Anthropic-compatible providers so
+        # tasks such as context compression can request a stronger thinking
+        # budget without changing the main agent's global reasoning level.
+        reasoning_config = None
+        extra_body = kwargs.get("extra_body")
+        if isinstance(extra_body, dict):
+            maybe_reasoning = extra_body.get("reasoning")
+            if isinstance(maybe_reasoning, dict):
+                reasoning_config = maybe_reasoning
+
         anthropic_kwargs = build_anthropic_kwargs(
             model=model,
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
-            reasoning_config=None,
+            reasoning_config=reasoning_config,
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
         )

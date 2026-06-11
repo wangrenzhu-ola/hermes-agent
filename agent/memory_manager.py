@@ -395,6 +395,30 @@ def build_memory_recall_audit_block(
     return "\n".join(lines)
 
 
+def build_memory_write_audit_line(events: list[dict[str, Any]] | None, *, include_empty: bool = False) -> str:
+    """Return a compact user-visible memory-write audit footer.
+
+    The footer intentionally reports only routing/action metadata, not memory
+    content. Memory entries can contain preferences, private operational facts,
+    or redacted material; echoing content into every gateway reply would turn an
+    observability feature into a disclosure path.
+    """
+    rows = [event for event in (events or []) if isinstance(event, dict)]
+    if not rows:
+        return "记忆写入：无" if include_empty else ""
+
+    parts: list[str] = []
+    for event in rows[:5]:
+        action = str(event.get("action") or "write").strip() or "write"
+        target = str(event.get("target") or "memory").strip() or "memory"
+        status = "ok" if event.get("success", True) else "failed"
+        mirror = " provider-mirrored" if event.get("external_provider_notified") else ""
+        parts.append(f"{action}->{target}({status}{mirror})")
+    if len(rows) > 5:
+        parts.append(f"+{len(rows) - 5} more")
+    return "记忆写入：" + "；".join(parts)
+
+
 class MemoryManager:
     """Orchestrates the built-in provider plus at most one external provider.
 

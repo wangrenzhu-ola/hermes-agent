@@ -354,10 +354,12 @@ def finalize_turn(
 
     _memory_recall_audit = ""
     _memory_recall_audit_line = ""
+    _memory_write_audit_line = ""
     try:
         from agent.memory_manager import (
             build_memory_recall_audit_block,
             build_memory_recall_audit_line,
+            build_memory_write_audit_line,
         )
         _prefetch_cache = getattr(agent, "_last_ext_prefetch_cache", "") or ""
         _memory_recall_audit = build_memory_recall_audit_block(
@@ -368,8 +370,12 @@ def finalize_turn(
             _prefetch_cache,
             include_empty=True,
         )
+        _memory_write_audit_line = build_memory_write_audit_line(
+            list(getattr(agent, "_memory_write_audit_events", []) or []),
+            include_empty=True,
+        )
     except Exception as exc:
-        logger.debug("memory recall audit result build failed: %s", exc)
+        logger.debug("memory audit result build failed: %s", exc)
 
     # Build result with interrupt info if applicable
     result = {
@@ -386,6 +392,7 @@ def finalize_turn(
         "response_previewed": getattr(agent, "_response_was_previewed", False),
         "memory_recall_audit": _memory_recall_audit,
         "memory_recall_audit_line": _memory_recall_audit_line,
+        "memory_write_audit_line": _memory_write_audit_line,
         "model": agent.model,
         "provider": agent.provider,
         "base_url": agent.base_url,
@@ -405,6 +412,10 @@ def finalize_turn(
     }
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
+    try:
+        agent._memory_write_audit_events = []
+    except Exception:
+        pass
     # If a /steer landed after the final assistant turn (no more tool
     # batches to drain into), hand it back to the caller so it can be
     # delivered as the next user turn instead of being silently lost.
