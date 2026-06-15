@@ -45,12 +45,18 @@ def generate_title(
     of silently accumulating untitled sessions.
     """
     # Truncate long messages to keep the request small
-    user_snippet = user_message[:500] if user_message else ""
-    assistant_snippet = assistant_response[:500] if assistant_response else ""
+    user_snippet = user_message[:450] if user_message else ""
+    assistant_snippet = assistant_response[:450] if assistant_response else ""
 
     messages = [
         {"role": "system", "content": _TITLE_PROMPT},
-        {"role": "user", "content": f"User: {user_snippet}\n\nAssistant: {assistant_snippet}"},
+        {
+            "role": "user",
+            "content": (
+                "Generate the conversation title now. Return ONLY the title text.\n\n"
+                f"Conversation start:\nUser: {user_snippet}\n\nAssistant: {assistant_snippet}"
+            ),
+        },
     ]
 
     try:
