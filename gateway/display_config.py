@@ -46,6 +46,14 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # deletion (e.g. Telegram). Off by default — progress is still shown
     # live, just cleaned up after success so the chat doesn't fill up with
     # stale breadcrumbs. Failed runs leave bubbles in place as breadcrumbs.
+    # Optional gateway-only recall quality audit.  Off by default because it
+    # exposes memory provenance to the user-visible chat.  When set to true or
+    # "summary", gateway replies prepend a compact L0/L1/L2 recall summary.
+    "visible_memory_recall": False,
+    # Optional gateway-only memory write audit footer.  When true or "summary",
+    # replies append a compact same-turn memory write summary; empty turns show
+    # "记忆写入：无" so operators can distinguish no-write from hidden-write.
+    "visible_memory_write": False,
     "cleanup_progress": False,
 }
 
