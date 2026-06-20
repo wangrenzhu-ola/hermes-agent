@@ -1022,24 +1022,49 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     operations=operations,
                     store=agent._memory_store,
                 )
+
+                if operations:
+                    _mem_ops = [
+                        op for op in operations
+                        if isinstance(op, dict) and op.get("action") in {"add", "replace", "remove"}
+                    ]
+                else:
+                    action = next_args.get("action")
+                    _mem_ops = (
+                        [{"action": action, "content": next_args.get("content")}]
+                        if action in {"add", "replace", "remove"} else []
+                    )
+
+                if _mem_ops:
+                    try:
+                        events = getattr(agent, "_memory_write_audit_events", None)
+                        if events is None:
+                            events = []
+                            setattr(agent, "_memory_write_audit_events", events)
+                        success = True
+                        if isinstance(result, dict) and result.get("success") is False:
+                            success = False
+                        for _op in _mem_ops:
+                            action = _op.get("action")
+                            events.append({
+                                "action": action,
+                                "target": _op.get("target", target),
+                                "success": success,
+                                "external_provider_notified": bool(agent._memory_manager and action in {"add", "replace"}),
+                            })
+                    except Exception:
+                        pass
+
                 # Bridge: notify external memory provider of built-in memory writes.
                 # Covers both the single-op shape and each add/replace inside a batch.
                 if agent._memory_manager:
-                    if operations:
-                        _mem_ops = [
-                            op for op in operations
-                            if isinstance(op, dict) and op.get("action") in {"add", "replace"}
-                        ]
-                    else:
-                        _mem_ops = (
-                            [{"action": next_args.get("action"), "content": next_args.get("content")}]
-                            if next_args.get("action") in {"add", "replace"} else []
-                        )
                     for _op in _mem_ops:
+                        if _op.get("action") not in {"add", "replace"}:
+                            continue
                         try:
                             agent._memory_manager.on_memory_write(
                                 _op.get("action", ""),
-                                target,
+                                _op.get("target", target),
                                 _op.get("content", "") or "",
                                 metadata=agent._build_memory_write_metadata(
                                     task_id=effective_task_id,

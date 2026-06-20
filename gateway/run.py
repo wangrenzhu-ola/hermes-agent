@@ -371,6 +371,80 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     return redacted
 
 
+def _gateway_response_has_memory_recall_prefix(text: str) -> bool:
+    body = str(text or "").lstrip()
+    return body.startswith("📚 **记忆召回**") or body.startswith("记忆召回：")
+
+
+def _gateway_response_has_memory_write_footer(text: str) -> bool:
+    body = str(text or "")
+    return bool(re.search(r"(?m)^记忆写入：", body))
+
+
+def _prepend_gateway_memory_recall_audit(response: str, audit: str) -> tuple[str, bool]:
+    if not response or not audit or _gateway_response_has_memory_recall_prefix(response):
+        return response, False
+    safe_audit = _redact_gateway_user_facing_secrets(str(audit).strip())
+    if not safe_audit:
+        return response, False
+    return f"{safe_audit}\n\n{response}", True
+
+
+def _extract_gateway_display_reasoning(agent_result: Dict[str, Any]) -> Optional[str]:
+    """Return same-turn reasoning text suitable for the gateway display block.
+
+    The primary path is ``agent_result['last_reasoning']``.  Some gateway runs
+    persist reasoning-only assistant rows but return a final assistant message
+    with no reasoning attached, leaving ``last_reasoning`` empty by the time the
+    final message is formatted.  Fall back to scanning the returned message list
+    backwards within the current turn so platforms like Weixin can still display
+    the same reasoning block Feishu/CLI users expect.
+    """
+    direct = agent_result.get("last_reasoning") if isinstance(agent_result, dict) else None
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    messages = agent_result.get("messages") if isinstance(agent_result, dict) else None
+    if not isinstance(messages, list):
+        return None
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "user":
+            break
+        if msg.get("role") != "assistant":
+            continue
+        for key in ("reasoning", "reasoning_content"):
+            value = msg.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _format_gateway_reasoning_prefix(platform: Any, reasoning: str) -> str:
+    """Format a compact reasoning block for final gateway messages."""
+    text = _redact_gateway_user_facing_secrets(str(reasoning or "").strip())
+    if not text:
+        return ""
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if _gateway_platform_value(platform) == "weixin":
+        max_lines = 8
+        max_chars = 900
+        title = "🧠 **思考过程**"
+    else:
+        max_lines = 15
+        max_chars = 1800
+        title = "💭 **Reasoning:**"
+    clipped = "\n".join(lines[:max_lines])
+    clipped = clipped[:max_chars].rstrip()
+    omitted = max(0, len(lines) - max_lines)
+    if len("\n".join(lines[:max_lines])) > max_chars:
+        omitted += 1
+    if omitted:
+        clipped += f"\n_... ({omitted} more lines)_"
+    return f"{title}\n```\n{clipped}\n```"
+
+
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery."""
     text = str(message or "").strip()
@@ -9630,6 +9704,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
 
+            _memory_write_line = ""
+            try:
+                from gateway.display_config import resolve_display_setting as _rds_write
+                _visible_memory_write_mode = _rds_write(
+                    _load_gateway_config(),
+                    _platform_config_key(source.platform),
+                    "visible_memory_write",
+                    False,
+                )
+            except Exception:
+                _visible_memory_write_mode = False
+            if _visible_memory_write_mode not in {False, None, "", "off"}:
+                _memory_write_line = _redact_gateway_user_facing_secrets(
+                    str(agent_result.get("memory_write_audit_line") or "记忆写入：无").strip()
+                )
+            if (
+                _memory_write_line
+                and response
+                and not agent_result.get("already_sent")
+                and not _gateway_response_has_memory_write_footer(response)
+            ):
+                response = f"{response}\n\n{_memory_write_line}"
+
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
@@ -9934,6 +10031,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
+                if _memory_write_line and not _gateway_response_has_memory_write_footer(response or ""):
+                    try:
+                        _write_adapter = self.adapters.get(source.platform)
+                        if _write_adapter:
+                            await _write_adapter.send(
+                                source.chat_id,
+                                _memory_write_line,
+                                metadata=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
+                            )
+                    except Exception as _e:
+                        logger.debug("trailing memory write audit send failed: %s", _e)
                 return None
 
             return response
@@ -16063,6 +16171,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
                 "response_transformed": result.get("response_transformed", False),
+                "memory_recall_audit": result.get("memory_recall_audit", ""),
+                "memory_recall_audit_line": result.get("memory_recall_audit_line", ""),
+                "memory_write_audit_line": result.get("memory_write_audit_line", ""),
             }
         
         # Start progress message sender if enabled

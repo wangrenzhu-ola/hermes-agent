@@ -43,6 +43,7 @@ Payment / credit exhaustion fallback:
 import json
 import logging
 import os
+import queue
 import threading
 import time
 from pathlib import Path  # noqa: F401 — used by test mocks
@@ -842,19 +843,58 @@ class _CodexCompletionsAdapter:
                 _check_cancelled()
 
             event_stream = self._client.responses.create(**stream_kwargs)
-            try:
-                final = _consume_codex_event_stream(
-                    event_stream,
-                    model=resp_kwargs.get("model"),
-                    on_event=_on_each_event,
-                )
-            finally:
+
+            def _close_event_stream() -> None:
                 close_fn = getattr(event_stream, "close", None)
                 if callable(close_fn):
                     try:
                         close_fn()
                     except Exception:
                         pass
+
+            def _consume_stream() -> SimpleNamespace:
+                try:
+                    return _consume_codex_event_stream(
+                        event_stream,
+                        model=str(resp_kwargs.get("model") or model),
+                        on_event=_on_each_event,
+                    )
+                finally:
+                    _close_event_stream()
+
+            if total_timeout:
+                # Do not block forever inside ``next(event_stream)`` while the
+                # total auxiliary timeout has already expired. Real network
+                # streams usually unblock when the client is closed by the
+                # timer; a slow/fake iterator may not. Race the consumer in a
+                # daemon thread so the chat.completions timeout contract is
+                # enforced by wall clock, not by event cadence.
+                result_q: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=1)
+
+                def _worker() -> None:
+                    try:
+                        result_q.put(("ok", _consume_stream()))
+                    except BaseException as exc:  # propagate control-flow errors too
+                        result_q.put(("err", exc))
+
+                worker = threading.Thread(target=_worker, daemon=True)
+                worker.start()
+                while True:
+                    remaining = max(0.0, (deadline or time.monotonic()) - time.monotonic())
+                    if remaining <= 0 or timed_out.is_set():
+                        _close_client_on_timeout()
+                        _close_event_stream()
+                        raise TimeoutError(_timeout_message())
+                    try:
+                        status, payload = result_q.get(timeout=min(remaining, 0.02))
+                        break
+                    except queue.Empty:
+                        continue
+                if status == "err":
+                    raise payload
+                final = payload
+            else:
+                final = _consume_stream()
 
             if final is None:
                 raise RuntimeError("Codex auxiliary Responses stream did not return a final response")
@@ -1024,12 +1064,23 @@ class _AnthropicCompletionsAdapter:
             elif choice_type in {"auto", "required", "none"}:
                 normalized_tool_choice = choice_type
 
+        # Auxiliary calls carry provider-specific knobs through extra_body.
+        # Preserve extra_body.reasoning for Anthropic-compatible providers so
+        # tasks such as context compression can request a stronger thinking
+        # budget without changing the main agent's global reasoning level.
+        reasoning_config = None
+        extra_body = kwargs.get("extra_body")
+        if isinstance(extra_body, dict):
+            maybe_reasoning = extra_body.get("reasoning")
+            if isinstance(maybe_reasoning, dict):
+                reasoning_config = maybe_reasoning
+
         anthropic_kwargs = build_anthropic_kwargs(
             model=model,
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
-            reasoning_config=None,
+            reasoning_config=reasoning_config,
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
         )

@@ -310,6 +310,176 @@ def build_memory_context_block(raw_context: str) -> str:
     )
 
 
+def _clean_memory_recall_context(raw_context: str) -> str:
+    """Return recall text with only internal fence tags removed.
+
+    Do NOT call :func:`sanitize_context` here: a valid provider block may be
+    wrapped in ``<memory-context>...</memory-context>``, and ``sanitize_context``
+    intentionally removes that whole hidden span.  Recall-audit renderers need
+    provenance metadata from the hidden block, while still returning only a
+    compact user-visible summary.
+    """
+    text = _INTERNAL_NOTE_RE.sub('', raw_context or '')
+    return re.sub(
+        r'</?\s*(?:memory-context|enterprise-memory)\s*>',
+        '',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
+def _memory_recall_hit_count(text: str) -> str:
+    match = re.search(r"Recall Results\s*\((\d+)\)", text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return str(len(re.findall(r"(?m)^\[\d+\]", text)))
+
+
+def _memory_recall_field(record: str, name: str) -> str:
+    m = re.search(rf"(?m)(?:^|\|)\s*{re.escape(name)}:\s*([^|\n]+)", record)
+    return m.group(1).strip() if m else ""
+
+
+def _memory_recall_records(text: str) -> list[str]:
+    return [
+        m.group(1).strip()
+        for m in re.finditer(r"(?ms)^\[\d+\]\s*(.*?)(?:\n---\n|\Z)", text)
+        if m.group(1).strip()
+    ]
+
+
+def build_memory_recall_audit_line(raw_context: str, *, include_empty: bool = False) -> str:
+    """Return a compact one-line user-visible recall audit summary."""
+    if not raw_context or not raw_context.strip():
+        return "记忆召回：无" if include_empty else ""
+
+    text = _clean_memory_recall_context(raw_context)
+    hit_count = _memory_recall_hit_count(text)
+    if hit_count == "0" and not include_empty:
+        return ""
+
+    records = _memory_recall_records(text)
+    first = records[0] if records else text
+
+    backend = _memory_recall_field(first, "backend") or "unknown"
+    scope = _memory_recall_field(first, "scope")
+    confidence = _memory_recall_field(first, "confidence")
+    source = (
+        _memory_recall_field(first, "path")
+        or _memory_recall_field(first, "source_ref")
+        or _memory_recall_field(first, "source_url")
+        or _memory_recall_field(first, "source")
+    )
+
+    parts = [f"记忆召回：{hit_count} hits", f"top backend={backend}"]
+    if source:
+        parts.append(f"top source={source}")
+    if confidence:
+        parts.append(f"confidence={confidence}")
+    if scope:
+        parts.append(f"scope={scope}")
+    return "；".join(parts)
+
+
+def build_memory_recall_audit_block(
+    raw_context: str,
+    *,
+    include_empty: bool = False,
+    max_items: int = 3,
+    max_excerpt_chars: int = 160,
+) -> str:
+    """Return a deterministic top-of-reply recall audit block.
+
+    This is the human-facing companion to the hidden memory context.  It shows
+    the hit count plus top records' layer / confidence / backend / source and a
+    short excerpt, so operators can judge L0/L1/L2 recall quality without
+    exposing the full injected ``<enterprise-memory>`` body.
+    """
+    if not raw_context or not raw_context.strip():
+        return "📚 **记忆召回**\n- 无" if include_empty else ""
+
+    text = _clean_memory_recall_context(raw_context)
+    hit_count = _memory_recall_hit_count(text)
+    records = _memory_recall_records(text)
+    if (hit_count == "0" or not records) and not include_empty:
+        return ""
+    if hit_count == "0" or not records:
+        return "📚 **记忆召回**\n- 无"
+
+    try:
+        limit = max(1, int(max_items))
+    except (TypeError, ValueError):
+        limit = 3
+
+    shown = records[:limit]
+    title = f"📚 **记忆召回**：{hit_count} hits"
+    if len(records) > len(shown):
+        title += f"（展示前 {len(shown)}）"
+
+    lines = [title]
+    for idx, record in enumerate(shown, 1):
+        header, _, body = record.partition("\n")
+        layer = _memory_recall_field(header, "layer") or _memory_recall_field(record, "layer") or "unknown-layer"
+        confidence = _memory_recall_field(header, "confidence") or _memory_recall_field(record, "confidence")
+        backend = _memory_recall_field(header, "backend") or _memory_recall_field(record, "backend") or "unknown"
+        disclosure = _memory_recall_field(header, "disclosure") or _memory_recall_field(record, "disclosure")
+        source = (
+            _memory_recall_field(header, "path")
+            or _memory_recall_field(header, "source_ref")
+            or _memory_recall_field(header, "source_url")
+            or _memory_recall_field(header, "source")
+            or _memory_recall_field(record, "path")
+            or _memory_recall_field(record, "source_ref")
+            or _memory_recall_field(record, "source_url")
+            or _memory_recall_field(record, "source")
+        )
+        meta = [layer]
+        if confidence:
+            meta.append(f"conf={confidence}")
+        if disclosure:
+            meta.append(f"{disclosure}")
+        meta.append(backend)
+        if source:
+            meta.append(source)
+        lines.append(f"{idx}. " + " | ".join(meta))
+
+        excerpt = " ".join(
+            line.strip()
+            for line in body.splitlines()
+            if line.strip() and not line.strip().startswith("---")
+        )
+        if excerpt:
+            if len(excerpt) > max_excerpt_chars:
+                excerpt = excerpt[: max(0, max_excerpt_chars - 1)].rstrip() + "…"
+            lines.append(f"   {excerpt}")
+
+    return "\n".join(lines)
+
+
+def build_memory_write_audit_line(events: list[dict[str, Any]] | None, *, include_empty: bool = False) -> str:
+    """Return a compact user-visible memory-write audit footer.
+
+    The footer intentionally reports only routing/action metadata, not memory
+    content. Memory entries can contain preferences, private operational facts,
+    or redacted material; echoing content into every gateway reply would turn an
+    observability feature into a disclosure path.
+    """
+    rows = [event for event in (events or []) if isinstance(event, dict)]
+    if not rows:
+        return "记忆写入：无" if include_empty else ""
+
+    parts: list[str] = []
+    for event in rows[:5]:
+        action = str(event.get("action") or "write").strip() or "write"
+        target = str(event.get("target") or "memory").strip() or "memory"
+        status = "ok" if event.get("success", True) else "failed"
+        mirror = " provider-mirrored" if event.get("external_provider_notified") else ""
+        parts.append(f"{action}->{target}({status}{mirror})")
+    if len(rows) > 5:
+        parts.append(f"+{len(rows) - 5} more")
+    return "记忆写入：" + "；".join(parts)
+
+
 class MemoryManager:
     """Orchestrates the built-in provider plus at most one external provider.
 
