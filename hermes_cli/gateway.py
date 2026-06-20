@@ -3739,11 +3739,17 @@ def launchd_restart():
             except (ProcessLookupError, PermissionError, OSError):
                 pid = None
             if pid is not None:
-                exited = _wait_for_gateway_exit(timeout=drain_timeout, force_after=None)
+                force_after = max(0.0, min(5.0, drain_timeout))
+                exited = _wait_for_gateway_exit(
+                    timeout=drain_timeout,
+                    force_after=force_after,
+                )
                 if not exited:
                     print(
-                        f"⚠ Gateway drain timed out after {drain_timeout:.0f}s — forcing launchd restart"
+                        f"⚠ Gateway drain timed out after {drain_timeout:.0f}s; "
+                        "old PID is still running — aborting launchd kickstart"
                     )
+                    return
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90)
         print("✓ Service restarted")
     except subprocess.CalledProcessError as e:
