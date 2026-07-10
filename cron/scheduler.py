@@ -2864,12 +2864,24 @@ def run_job(
         except Exception:
             pass
 
-        # Reasoning config from config.yaml (raw value — a YAML boolean False
-        # means thinking disabled, see parse_reasoning_effort)
+        # Reasoning config: a per-job override lets inexpensive recurring work
+        # avoid inheriting the interactive agent's heavier default.  Preserve
+        # YAML boolean ``False`` semantics (explicitly disable thinking) and
+        # fall back to the profile default when a job does not pin a value.
         from hermes_constants import parse_reasoning_effort
-        reasoning_config = parse_reasoning_effort(
-            _cfg.get("agent", {}).get("reasoning_effort", "")
+        _job_reasoning_effort = job.get("reasoning_effort", None)
+        _agent_reasoning_config = _cfg.get("agent", {}) if isinstance(_cfg, dict) else {}
+        _agent_reasoning_effort = (
+            _agent_reasoning_config.get("reasoning_effort", "")
+            if isinstance(_agent_reasoning_config, dict)
+            else ""
         )
+        _configured_reasoning_effort = (
+            _job_reasoning_effort
+            if _job_reasoning_effort is not None
+            else _agent_reasoning_effort
+        )
+        reasoning_config = parse_reasoning_effort(_configured_reasoning_effort)
 
         # Prefill messages from env or config.yaml. The top-level
         # prefill_messages_file key is canonical; agent.prefill_messages_file is
