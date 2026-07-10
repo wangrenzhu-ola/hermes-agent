@@ -504,6 +504,53 @@ def _load_simple_env(path) -> dict[str, str]:
     return values
 
 
+def _preserve_embedded_profile_runtime_keys(path) -> dict[str, str]:
+    """Return Hindsight profile keys that must survive env materialization.
+
+    ``hindsight_embed.ProfileManager`` stores the daemon API/UI ports in the
+    profile .env. Hermes periodically rewrites that file from config.json; if we
+    drop those keys, the next process may allocate a different port while
+    config.json still points at the old ``api_url``. Preserve runtime-owned
+    profile keys so local_embedded stays stable across setup/runtime refreshes.
+    """
+    existing = _load_simple_env(path)
+    preserved: dict[str, str] = {}
+    for key in (
+        "HINDSIGHT_API_PORT",
+        "HINDSIGHT_EMBED_CP_PORT",
+    ):
+        value = existing.get(key)
+        if value:
+            preserved[key] = value
+    return preserved
+
+
+def _api_port_from_url(url: str | None) -> str | None:
+    """Extract an explicit localhost/loopback port from an API URL."""
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(str(url))
+    except Exception:
+        return None
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    if parsed.port is None:
+        return None
+    return str(parsed.port)
+
+
+def _sync_embedded_api_port_from_config(config: dict[str, Any], env_values: dict[str, str]) -> None:
+    """Seed the embedded profile API port from config.api_url when available."""
+    if "HINDSIGHT_API_PORT" in env_values:
+        return
+    port = _api_port_from_url(config.get("api_url"))
+    if port:
+        env_values["HINDSIGHT_API_PORT"] = port
+
+
 def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | None = None) -> dict[str, str]:
     """Build the profile-scoped env file that standalone hindsight-embed consumes."""
     current_key = llm_api_key
@@ -552,7 +599,9 @@ def _materialize_embedded_profile_env(config: dict[str, Any], *, llm_api_key: st
     """Write the profile-scoped env file that standalone hindsight-embed uses."""
     profile_env = _embedded_profile_env_path(config)
     profile_env.parent.mkdir(parents=True, exist_ok=True)
-    env_values = _build_embedded_profile_env(config, llm_api_key=llm_api_key)
+    env_values = _preserve_embedded_profile_runtime_keys(profile_env)
+    env_values.update(_build_embedded_profile_env(config, llm_api_key=llm_api_key))
+    _sync_embedded_api_port_from_config(config, env_values)
     profile_env.write_text(
         "".join(f"{key}={value}\n" for key, value in env_values.items()),
         encoding="utf-8",
