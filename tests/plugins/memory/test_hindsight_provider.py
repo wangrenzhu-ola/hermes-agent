@@ -22,6 +22,7 @@ from plugins.memory.hindsight import (
     REFLECT_SCHEMA,
     RETAIN_SCHEMA,
     _load_config,
+    _preserve_embedded_profile_runtime_keys,
     _build_embedded_profile_env,
     _normalize_observation_scopes,
     _normalize_retain_tags,
@@ -416,6 +417,59 @@ class TestConfig:
         })
 
         assert env["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "42"
+
+    def test_preserve_embedded_profile_runtime_ports(self, tmp_path):
+        profile_env = tmp_path / ".hindsight" / "profiles" / "hermes.env"
+        profile_env.parent.mkdir(parents=True)
+        profile_env.write_text(
+            "HINDSIGHT_API_PORT=9784\n"
+            "HINDSIGHT_EMBED_CP_PORT=19784\n"
+            "HINDSIGHT_API_LLM_MODEL=old-model\n"
+        )
+
+        assert _preserve_embedded_profile_runtime_keys(profile_env) == {
+            "HINDSIGHT_API_PORT": "9784",
+            "HINDSIGHT_EMBED_CP_PORT": "19784",
+        }
+
+    def test_materialize_embedded_profile_env_preserves_existing_ports(self, tmp_path, monkeypatch):
+        from plugins.memory.hindsight import _materialize_embedded_profile_env
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        profile_env = tmp_path / ".hindsight" / "profiles" / "hermes.env"
+        profile_env.parent.mkdir(parents=True)
+        profile_env.write_text(
+            "HINDSIGHT_API_PORT=9784\n"
+            "HINDSIGHT_EMBED_CP_PORT=19784\n"
+            "HINDSIGHT_API_LLM_MODEL=old-model\n"
+        )
+
+        _materialize_embedded_profile_env({
+            "profile": "hermes",
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
+            "idle_timeout": 0,
+        })
+
+        text = profile_env.read_text()
+        assert "HINDSIGHT_API_PORT=9784\n" in text
+        assert "HINDSIGHT_EMBED_CP_PORT=19784\n" in text
+        assert "HINDSIGHT_API_LLM_MODEL=gpt-4o-mini\n" in text
+
+    def test_materialize_embedded_profile_env_seeds_api_port_from_loopback_api_url(self, tmp_path, monkeypatch):
+        from plugins.memory.hindsight import _materialize_embedded_profile_env
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        profile_env = tmp_path / ".hindsight" / "profiles" / "hermes.env"
+
+        _materialize_embedded_profile_env({
+            "profile": "hermes",
+            "api_url": "http://127.0.0.1:9784",
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
+        })
+
+        assert "HINDSIGHT_API_PORT=9784\n" in profile_env.read_text()
 
     def test_get_client_passes_idle_timeout_to_hindsight_embedded(self, monkeypatch):
         captured = {}
