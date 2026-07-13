@@ -94,6 +94,46 @@ class TestResolveDisplaySetting:
         assert resolve_display_setting(config, "slack", "tool_progress") == "off"
         assert resolve_display_setting(config, "telegram", "tool_progress") == "all"
 
+    def test_scoped_dm_override_wins_over_platform_override(self):
+        """DM scope can be more visible while platform/group remains quiet."""
+        from gateway.display_config import resolve_display_setting, resolve_display_setting_for_scope
+
+        config = {
+            "display": {
+                "platforms": {
+                    "feishu": {
+                        "tool_progress": False,
+                        "scopes": {
+                            "dm": {"tool_progress": "verbose", "tool_preview_length": 0},
+                        },
+                    },
+                },
+            }
+        }
+
+        # Existing callers without a scope preserve the platform-level result.
+        assert resolve_display_setting(config, "feishu", "tool_progress") == "off"
+        # Gateway DM calls get the richer scoped setting.
+        assert (
+            resolve_display_setting_for_scope(
+                config, "feishu", "tool_progress", scope="dm"
+            )
+            == "verbose"
+        )
+        assert (
+            resolve_display_setting_for_scope(
+                config, "feishu", "tool_preview_length", scope="dm"
+            )
+            == 0
+        )
+        # Groups still use the quiet platform-level value.
+        assert (
+            resolve_display_setting_for_scope(
+                config, "feishu", "tool_progress", scope="group"
+            )
+            == "off"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Backward compatibility: tool_progress_overrides

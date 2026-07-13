@@ -50,6 +50,13 @@ _NEW_SEGMENT = object()
 # API/tool iterations (for example: "I'll inspect the repo first.").
 _COMMENTARY = object()
 
+# Queue markers for a live reasoning/thinking stream. These are intentionally
+# separate from the normal assistant-content stream so a visible reasoning
+# bubble never marks the final assistant answer as delivered.
+_REASONING_DELTA = object()
+_REASONING_DONE = object()
+_WORK_EVENT = object()
+
 
 @dataclass
 class StreamConsumerConfig:
@@ -207,6 +214,19 @@ class GatewayStreamConsumer:
         self._in_think_block = False
         self._think_buffer = ""
 
+        # Live reasoning stream state. This auxiliary editable bubble (for
+        # example Feishu's "🧠 思考过程") is delivered before the normal assistant
+        # answer stream. It must not mutate _already_sent or final-response
+        # flags, otherwise a reasoning-only preview could suppress delivery of
+        # the actual answer.
+        self._reasoning_accumulated = ""
+        self._reasoning_message_id: Optional[str] = None
+        self._reasoning_created_ts: Optional[float] = None
+        self._reasoning_last_sent_text = ""
+        self._reasoning_last_edit_time = 0.0
+        self._reasoning_edit_supported = True
+        self._work_events: list[str] = []
+
         # Native draft-streaming state.  Resolved at the start of run() based
         # on cfg.transport, cfg.chat_type, and the adapter's
         # supports_draft_streaming() probe.  When True, the consumer emits
@@ -328,6 +348,20 @@ class GatewayStreamConsumer:
         """Queue a completed interim assistant commentary message."""
         if text:
             self._queue.put((_COMMENTARY, text))
+
+    def on_work_event(self, text: str) -> None:
+        """Queue a user-visible execution milestone for the workbench card."""
+        if text:
+            self._queue.put((_WORK_EVENT, text))
+
+    def on_reasoning_delta(self, text: str) -> None:
+        """Queue a provider reasoning/thinking delta for live display."""
+        if text:
+            self._queue.put((_REASONING_DELTA, text))
+
+    def finish_reasoning(self) -> None:
+        """Finalize the live reasoning bubble if one is active."""
+        self._queue.put(_REASONING_DONE)
 
     def _notify_new_message(self) -> None:
         """Fire the on_new_message callback, swallowing any errors."""
@@ -580,19 +614,38 @@ class GatewayStreamConsumer:
                 # Drain all available items from the queue
                 got_done = False
                 got_segment_break = False
+                got_reasoning_done = False
+                saw_reasoning_delta = False
                 commentary_text = None
                 while True:
                     try:
                         item = self._queue.get_nowait()
                         if item is _DONE:
                             got_done = True
+                            got_reasoning_done = True
                             break
                         if item is _NEW_SEGMENT:
                             got_segment_break = True
                             break
+                        if item is _REASONING_DONE:
+                            got_reasoning_done = True
+                            continue
                         if isinstance(item, tuple) and len(item) == 2 and item[0] is _COMMENTARY:
                             commentary_text = item[1]
                             break
+                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _WORK_EVENT:
+                            work_event = str(item[1] or "").strip()
+                            if work_event and work_event not in self._work_events:
+                                self._work_events.append(work_event)
+                                self._work_events = self._work_events[-6:]
+                                saw_reasoning_delta = True
+                            continue
+                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _REASONING_DELTA:
+                            delta_text = str(item[1] or "")
+                            if delta_text:
+                                self._reasoning_accumulated += delta_text
+                                saw_reasoning_delta = True
+                            continue
                         self._filter_and_accumulate(item)
                     except queue.Empty:
                         break
@@ -621,6 +674,25 @@ class GatewayStreamConsumer:
 
                 # Decide whether to flush an edit
                 now = time.monotonic()
+                reasoning_elapsed = now - self._reasoning_last_edit_time
+                should_reasoning_edit = bool(
+                    (self._reasoning_accumulated or self._work_events)
+                    and (
+                        got_reasoning_done
+                        or (
+                            not self.cfg.buffer_only
+                            and saw_reasoning_delta
+                            and (
+                                reasoning_elapsed >= self._current_edit_interval
+                                or len(self._reasoning_accumulated) >= self.cfg.buffer_threshold
+                            )
+                        )
+                    )
+                )
+                if should_reasoning_edit:
+                    await self._send_or_edit_reasoning(finalize=got_reasoning_done)
+                    self._reasoning_last_edit_time = time.monotonic()
+
                 elapsed = now - self._last_edit_time
                 should_edit = (
                     got_done
@@ -909,6 +981,99 @@ class GatewayStreamConsumer:
         user.
         """
         return _BasePlatformAdapter.strip_media_directives_for_display(text)
+
+    @staticmethod
+    def _redact_reasoning_display(text: str) -> str:
+        """Best-effort secret redaction for live reasoning previews."""
+        redacted = str(text or "")
+        patterns = (
+            r"sk-[A-Za-z0-9_\-]{8,}",
+            r"Bearer\s+[A-Za-z0-9._\-]{8,}",
+            r"(?i)(api[_-]?key|secret|token)(\s*[:=]\s*)[^\s`'\"]{6,}",
+        )
+        for pattern in patterns:
+            try:
+                redacted = re.sub(pattern, lambda m: (m.group(1) + m.group(2) if m.lastindex and m.lastindex >= 2 else "") + "[REDACTED]", redacted)
+            except Exception:
+                continue
+        return redacted
+
+    @staticmethod
+    def _normalize_reasoning_display(text: str) -> str:
+        """Convert raw provider planning into a compact, readable work trace."""
+        raw = re.sub(r"<!--.*?-->", "\n", str(text or ""), flags=re.S)
+        raw = re.sub(r"[^\S\n]+", " ", raw)
+        raw = re.sub(r"\n{2,}", "\n", raw).strip()
+        if not raw:
+            return ""
+        phrases: list[str] = []
+        for sentence in re.split(r"(?<=[.!?。！？])\s+|\n+", raw):
+            sentence = sentence.strip(" -•\t")
+            sentence = re.sub(r"^planning\s+", "", sentence, flags=re.I)
+            sentence = re.sub(r"^inspecting\s+", "检查 ", sentence, flags=re.I)
+            sentence = re.sub(r"^locating\s+", "定位 ", sentence, flags=re.I)
+            sentence = re.sub(r"^analyzing\s+", "分析 ", sentence, flags=re.I)
+            sentence = re.sub(r"^verifying\s+", "验证 ", sentence, flags=re.I)
+            if not sentence or sentence.lower() in {p.lower() for p in phrases}:
+                continue
+            phrases.append(sentence)
+        return "\n".join(f"• {item}" for item in phrases[-6:])
+
+    def _reasoning_display_text(self, *, finalize: bool = False) -> str:
+        analysis = self._normalize_reasoning_display(
+            self._redact_reasoning_display(self._reasoning_accumulated)
+        )
+        execution = "\n".join(f"• {item}" for item in self._work_events[-4:])
+        sections = []
+        if analysis:
+            sections.append(f"**分析**\n{analysis}")
+        if execution:
+            sections.append(f"**执行**\n{execution}")
+        if not sections:
+            return ""
+        text = "🧠 **分析与执行**\n" + "\n".join(sections)
+        if not finalize and self.cfg.cursor:
+            text += self.cfg.cursor
+        return text
+
+    async def _send_or_edit_reasoning(self, *, finalize: bool = False) -> bool:
+        """Send/edit the auxiliary live reasoning bubble."""
+        text = self._clean_for_display(self._reasoning_display_text(finalize=finalize))
+        if not text.strip() or text == self._reasoning_last_sent_text:
+            return True
+        try:
+            if self._reasoning_message_id and self._reasoning_edit_supported:
+                result = await self._edit_message(
+                    message_id=self._reasoning_message_id,
+                    content=text,
+                    finalize=finalize,
+                )
+                if getattr(result, "success", False):
+                    self._reasoning_last_sent_text = text
+                    return True
+                self._reasoning_edit_supported = False
+                return False
+            result = await self.adapter.send(
+                chat_id=self.chat_id,
+                content=text,
+                metadata=self.metadata,
+            )
+            if getattr(result, "success", False):
+                mid = getattr(result, "message_id", None)
+                if mid:
+                    self._reasoning_message_id = str(mid)
+                    self._reasoning_created_ts = time.monotonic()
+                else:
+                    self._reasoning_edit_supported = False
+                self._reasoning_last_sent_text = text
+                self._notify_new_message()
+                return True
+            self._reasoning_edit_supported = False
+            return False
+        except Exception as e:
+            logger.debug("Reasoning stream send/edit error: %s", e)
+            self._reasoning_edit_supported = False
+            return False
 
     async def _send_new_chunk(
         self,

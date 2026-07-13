@@ -313,6 +313,7 @@ class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_resolves_once(self):
         adapter = _make_adapter()
+        adapter._allowed_group_users = {"ou_user1"}
         adapter._approval_state[1] = {
             "session_key": "agent:main:feishu:group:oc_12345",
             "message_id": "msg_001",
@@ -328,6 +329,7 @@ class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_resolves_deny(self):
         adapter = _make_adapter()
+        adapter._allowed_group_users = {"ou_user1"}
         adapter._approval_state[2] = {
             "session_key": "some-session",
             "message_id": "msg_002",
@@ -342,6 +344,7 @@ class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_resolves_session(self):
         adapter = _make_adapter()
+        adapter._allowed_group_users = {"ou_user1"}
         adapter._approval_state[3] = {
             "session_key": "sess-3",
             "message_id": "msg_003",
@@ -356,6 +359,7 @@ class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_resolves_always(self):
         adapter = _make_adapter()
+        adapter._allowed_group_users = {"ou_user1"}
         adapter._approval_state[4] = {
             "session_key": "sess-4",
             "message_id": "msg_004",
@@ -523,6 +527,28 @@ class TestCardActionCallbackResponse:
         card = response.card.data
         assert card["header"]["template"] == "red"
         assert "Denied" in card["header"]["title"]["content"]
+
+    def test_ai_host_acceptance_forwards_operator_identity(self, _patch_callback_card_types):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._sender_name_cache["ou_reporter"] = ("Reporter", 9999999999)
+        data = _make_card_action_data(
+            {"ai_host_acceptance": True, "ticket_id": "T-test", "decision": "accepted_by_reporter", "evidence_version": 2, "acceptance_token": "opaque"},
+            open_id="ou_reporter",
+        )
+        response_ctx = MagicMock()
+        response_ctx.__enter__.return_value.read.return_value = b'{"event":{"id":"evt"}}'
+        response_ctx.__exit__.return_value = False
+        with patch.object(feishu_module, "urlopen", return_value=response_ctx) as mock_urlopen:
+            response = adapter._on_card_action_trigger(data)
+        assert response.card is not None
+        request = mock_urlopen.call_args[0][0]
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload["actor_id"] == "ou_reporter"
+        assert payload["chat_id"] == "oc_12345"
+        assert payload["acceptance_token"] == "opaque"
+        assert response.card.data["header"]["title"]["content"] == "ai-host 工单人工验收"
 
     def test_ignores_missing_approval_id(self, _patch_callback_card_types):
         adapter = _make_adapter()

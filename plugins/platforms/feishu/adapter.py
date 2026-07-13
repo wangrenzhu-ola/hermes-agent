@@ -2656,6 +2656,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
         if hermes_action:
             return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
+        if isinstance(action_value, dict) and action_value.get("ai_host_acceptance"):
+            return self._handle_ai_host_acceptance_card_action(event=event, action_value=action_value)
         if update_prompt_action:
             return self._handle_update_prompt_card_action(
                 event=event,
@@ -2667,6 +2669,56 @@ class FeishuAdapter(BasePlatformAdapter):
         if P2CardActionTriggerResponse is None:
             return None
         return P2CardActionTriggerResponse()
+
+    def _handle_ai_host_acceptance_card_action(self, *, event: Any, action_value: Dict[str, Any]) -> Any:
+        """Write a reporter's ai-host acceptance choice to the local bridge.
+
+        The bridge is the authorization authority: it checks reporter open_id,
+        source chat, evidence version, card-bound random token, and idempotency.
+        This callback only forwards the signed-in Feishu operator identity.
+        """
+        operator = getattr(event, "operator", None)
+        context = getattr(event, "context", None)
+        open_id = str(getattr(operator, "open_id", "") or "")
+        chat_id = str(getattr(context, "open_chat_id", "") or "")
+        ticket_id = str(action_value.get("ticket_id", "") or "")
+        decision = str(action_value.get("decision", "") or "")
+        if not open_id or not chat_id or not ticket_id or not decision:
+            logger.warning("[Feishu] Dropping malformed ai-host acceptance card action")
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+        payload = {
+            "actor_id": open_id,
+            "actor_name": self._get_cached_sender_name(open_id) or open_id,
+            "chat_id": chat_id,
+            "decision": decision,
+            "evidence_version": action_value.get("evidence_version"),
+            "acceptance_token": str(action_value.get("acceptance_token", "") or ""),
+        }
+        base_url = os.getenv("AI_HOST_TICKET_BRIDGE_URL", "http://127.0.0.1:4317").rstrip("/")
+        request_url = f"{base_url}/api/tickets/{ticket_id}/human-acceptance"
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            request = Request(request_url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(request, timeout=8) as response:
+                result = json.loads(response.read().decode("utf-8") or "{}")
+            status = "已记录提出方人工验收通过" if decision == "accepted_by_reporter" else "已记录反馈，工单将继续处理"
+            logger.info("[Feishu] ai-host acceptance recorded ticket=%s decision=%s", ticket_id, decision)
+        except (HTTPError, URLError, ValueError, OSError) as exc:
+            logger.warning("[Feishu] ai-host acceptance rejected ticket=%s: %s", ticket_id, str(exc)[:240])
+            status = "本次操作未生效：卡片可能已过期，或无验收权限。请等待系统重新发卡。"
+        if P2CardActionTriggerResponse is None:
+            return None
+        response = P2CardActionTriggerResponse()
+        if CallBackCard is not None:
+            card = CallBackCard()
+            card.type = "raw"
+            card.data = {
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "green", "title": {"tag": "plain_text", "content": "ai-host 工单人工验收"}},
+                "elements": [{"tag": "markdown", "content": status}],
+            }
+            response.card = card
+        return response
 
     @staticmethod
     def _loop_accepts_callbacks(loop: Any) -> bool:
@@ -2694,7 +2746,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
         allowed_ids = set(self._admins) | set(self._allowed_group_users)
         if not allowed_ids:
-            return True
+            return False
         return "*" in allowed_ids or normalized in allowed_ids
 
     def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
@@ -2711,8 +2763,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
-        sender_id = SimpleNamespace(open_id=open_id, user_id=str(getattr(operator, "user_id", "") or ""))
-        if not self._allow_group_message(sender_id, state.get("chat_id", ""), is_bot=False):
+        if not self._is_interactive_operator_authorized(open_id):
             logger.warning("[Feishu] Unauthorized approval click by %s", open_id or "<unknown>")
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
@@ -2771,8 +2822,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
-        sender_id = SimpleNamespace(open_id=open_id, user_id=str(getattr(operator, "user_id", "") or ""))
-        if not self._allow_group_message(sender_id, state.get("chat_id", ""), is_bot=False):
+        if not self._is_interactive_operator_authorized(open_id):
             logger.warning("[Feishu] Unauthorized update prompt click by %s", open_id or "<unknown>")
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 

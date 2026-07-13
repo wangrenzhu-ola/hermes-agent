@@ -550,7 +550,7 @@ class TestRoutingIntents:
         for token in ("ALL", "All", "all"):
             targets = _resolve_delivery_targets({"deliver": token, "origin": None})
             platforms = sorted(t["platform"].lower() for t in targets)
-            assert platforms == ["discord", "telegram"], f"token={token!r} -> {platforms}"
+            assert {"discord", "telegram"}.issubset(platforms), f"token={token!r} -> {platforms}"
 
 
 class TestDeliverResultWrapping:

@@ -11781,7 +11781,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if source.platform == Platform.MATTERMOST
                     else getattr(self, "_show_reasoning", False)
                 )
-            if _show_reasoning_effective and response and not _intentional_silence:
+            _reasoning_posthoc_suppressed = bool(
+                _platform_config_key(source.platform) == "feishu"
+                and agent_result.get("response_previewed")
+            )
+            if (
+                _show_reasoning_effective
+                and response
+                and not _reasoning_posthoc_suppressed
+                and not _intentional_silence
+            ):
                 last_reasoning = agent_result.get("last_reasoning")
                 if last_reasoning:
                     # Collapse long reasoning to keep messages readable
@@ -17052,10 +17061,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not isinstance(display_config, dict):
             display_config = {}
 
-        # Per-platform display settings — resolve via display_config module
-        # which checks display.platforms.<platform>.<key> first, then
-        # display.<key> global, then built-in platform defaults.
-        from gateway.display_config import resolve_display_setting
+        # Per-platform display settings — resolve via display_config module.
+        # Direct messages may opt into richer visibility via
+        # display.platforms.<platform>.scopes.dm while groups stay quiet.
+        from gateway.display_config import (
+            resolve_display_setting_for_scope,
+            scope_for_chat_type,
+        )
+        _display_scope = scope_for_chat_type(getattr(source, "chat_type", None))
+
+        def resolve_display_setting(
+            _user_config,
+            _platform_key,
+            _setting,
+            _fallback=None,
+        ):
+            return resolve_display_setting_for_scope(
+                _user_config,
+                _platform_key,
+                _setting,
+                fallback=_fallback,
+                scope=_display_scope,
+            )
 
         # Apply tool preview length config (0 = no limit)
         try:
@@ -17259,6 +17286,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
             if not progress_queue or not _run_still_current():
                 return
+
+            # Workbench card: record a compact, auditable milestone. Never
+            # expose raw arguments/commands here; those stay in code snippets
+            # and the detailed tool log according to display policy.
+            if event_type == "tool.started" and tool_name:
+                try:
+                    _workbench = stream_consumer_holder[0] if stream_consumer_holder else None
+                    if _workbench is not None:
+                        _labels = {
+                            "read_file": "读取项目文件",
+                            "search_files": "检索项目代码",
+                            "patch": "修改代码",
+                            "write_file": "写入文件",
+                            "terminal": "执行验证命令",
+                            "delegate_task": "委派专项任务",
+                            "web_search": "检索外部资料",
+                        }
+                        _workbench.on_work_event(_labels.get(tool_name, f"执行 {tool_name}"))
+                except Exception:
+                    pass
 
             # First-touch onboarding: the first time a tool takes longer than
             # _LONG_TOOL_THRESHOLD_S during a run that's streaming every tool
@@ -18061,6 +18108,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _want_stream_deltas = _streaming_enabled
             _want_interim_messages = interim_assistant_messages_enabled
             _want_interim_consumer = _want_interim_messages
+            _show_reasoning_live = bool(
+                resolve_display_setting(
+                    user_config,
+                    platform_key,
+                    "show_reasoning",
+                    getattr(self, "_show_reasoning", False),
+                )
+            )
+            _reasoning_started = [False]
+            _reasoning_finished = [False]
+            def _finish_reasoning_stream() -> None:
+                if (
+                    _stream_consumer is not None
+                    and _reasoning_started[0]
+                    and not _reasoning_finished[0]
+                ):
+                    _stream_consumer.finish_reasoning()
+                    _reasoning_finished[0] = True
             if _want_stream_deltas or _want_interim_consumer:
                 try:
                     from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
@@ -18124,6 +18189,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
                                 if _run_still_current():
+                                    if text is not None:
+                                        _finish_reasoning_stream()
                                     _stream_consumer.on_delta(text)
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
@@ -18151,6 +18218,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     logger=logger,
                     log_message="interim_assistant_callback scheduling error",
                 )
+
+            def _reasoning_delta_cb(text: str) -> None:
+                """Bridge provider reasoning-summary deltas to the stream consumer."""
+                if (
+                    not _run_still_current()
+                    or _stream_consumer is None
+                    or not _show_reasoning_live
+                    or not _streaming_enabled
+                    or source.platform != Platform.FEISHU
+                ):
+                    return
+                delta = _redact_gateway_user_facing_secrets(str(text or ""))
+                if not delta:
+                    return
+                _reasoning_started[0] = True
+                _reasoning_finished[0] = False
+                _stream_consumer.on_reasoning_delta(delta)
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
 
@@ -18357,6 +18441,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
+            setattr(agent, "reasoning_callback", _reasoning_delta_cb if _show_reasoning_live else None)
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
             agent.status_callback = _status_callback_sync
             # Credits / out-of-band notices (usage bands, depletion, restored).
@@ -19177,7 +19262,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "model": _resolved_model,
                 "context_length": _context_length,
                 "session_id": effective_session_id,
-                "response_previewed": result.get("response_previewed", False),
+                "response_previewed": bool(_stream_consumer is not None and _want_stream_deltas and final_response),
                 "response_transformed": result.get("response_transformed", False),
                 # Pass through the agent_persisted flag so the persistence block
                 # above can correctly determine whether the codex app-server path

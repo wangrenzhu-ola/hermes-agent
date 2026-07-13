@@ -4,10 +4,11 @@ Provides ``resolve_display_setting()`` — the single entry-point for reading
 display settings with platform-specific overrides and sensible defaults.
 
 Resolution order (first non-None wins):
-    1. ``display.platforms.<platform>.<key>``  — explicit per-platform user override
-    2. ``display.<key>``                       — global user setting
-    3. ``_PLATFORM_DEFAULTS[<platform>][<key>]``  — built-in sensible default
-    4. ``_GLOBAL_DEFAULTS[<key>]``              — built-in global default
+    1. ``display.platforms.<platform>.scopes.<scope>.<key>`` — explicit DM/group override
+    2. ``display.platforms.<platform>.<key>``  — explicit per-platform user override
+    3. ``display.<key>``                       — global user setting
+    4. ``_PLATFORM_DEFAULTS[<platform>][<key>]``  — built-in sensible default
+    5. ``_GLOBAL_DEFAULTS[<key>]``              — built-in global default
 
 Exception: ``display.streaming`` is CLI-only.  Gateway streaming follows the
 top-level ``streaming`` config unless ``display.platforms.<platform>.streaming``
@@ -186,17 +187,52 @@ def resolve_display_setting(
     -------
     The resolved value, or *fallback* if nothing is configured.
     """
+    return resolve_display_setting_for_scope(
+        user_config,
+        platform_key,
+        setting,
+        fallback=fallback,
+        scope=None,
+    )
+
+
+def resolve_display_setting_for_scope(
+    user_config: dict,
+    platform_key: str,
+    setting: str,
+    fallback: Any = None,
+    *,
+    scope: str | None = None,
+) -> Any:
+    """Resolve a display setting with optional DM/group scoped overrides.
+
+    ``display.platforms.<platform>.scopes.dm`` is useful for mobile/workspace
+    platforms where direct-message visibility can be richer while groups stay
+    quiet. Scoped values intentionally outrank platform-level values so a
+    config such as ``feishu.tool_progress: off`` plus
+    ``feishu.scopes.dm.tool_progress: verbose`` behaves as expected.
+    """
     display_cfg = user_config.get("display") or {}
 
-    # 1. Explicit per-platform override (display.platforms.<platform>.<key>)
+    # 1. Explicit scoped override
+    #    (display.platforms.<platform>.scopes.<dm|group>.<key>)
     platforms = display_cfg.get("platforms") or {}
     plat_overrides = platforms.get(platform_key)
     if isinstance(plat_overrides, dict):
+        if scope:
+            scopes = plat_overrides.get("scopes") or {}
+            scoped_overrides = scopes.get(str(scope).lower())
+            if isinstance(scoped_overrides, dict):
+                val = scoped_overrides.get(setting)
+                if val is not None:
+                    return _normalise(setting, val)
+
+        # 2. Explicit per-platform override (display.platforms.<platform>.<key>)
         val = plat_overrides.get(setting)
         if val is not None:
             return _normalise(setting, val)
 
-    # 1b. Backward compat: display.tool_progress_overrides.<platform>
+    # 2b. Backward compat: display.tool_progress_overrides.<platform>
     if setting == "tool_progress":
         legacy = display_cfg.get("tool_progress_overrides")
         if isinstance(legacy, dict):
@@ -204,7 +240,7 @@ def resolve_display_setting(
             if val is not None:
                 return _normalise(setting, val)
 
-    # 2. Global user setting (display.<key>).  Skip display.streaming because
+    # 3. Global user setting (display.<key>).  Skip display.streaming because
     # that key controls only CLI terminal streaming; gateway token streaming is
     # governed by the top-level streaming config plus per-platform overrides.
     if setting != "streaming":
@@ -212,19 +248,26 @@ def resolve_display_setting(
         if val is not None:
             return _normalise(setting, val)
 
-    # 3. Built-in platform default
+    # 4. Built-in platform default
     plat_defaults = _PLATFORM_DEFAULTS.get(platform_key)
     if plat_defaults:
         val = plat_defaults.get(setting)
         if val is not None:
             return val
 
-    # 4. Built-in global default
+    # 5. Built-in global default
     val = _GLOBAL_DEFAULTS.get(setting)
     if val is not None:
         return val
 
     return fallback
+
+
+def scope_for_chat_type(chat_type: str | None) -> str:
+    """Map gateway chat_type values onto display scope keys."""
+    if str(chat_type or "").lower() in {"dm", "direct", "im", "private"}:
+        return "dm"
+    return "group"
 
 
 # ---------------------------------------------------------------------------
