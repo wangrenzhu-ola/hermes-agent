@@ -55,23 +55,54 @@ def _make_adapter() -> FeishuAdapter:
 
 
 def _make_card_action_data(
-    action_value: dict,
+    action_value,
     chat_id: str = "oc_12345",
     open_id: str = "ou_user1",
     token: str = "tok_abc",
+    *,
+    mapping_identity: bool = False,
 ) -> SimpleNamespace:
     """Create a mock Feishu card action callback data object."""
+    context = {"open_chat_id": chat_id} if mapping_identity else SimpleNamespace(open_chat_id=chat_id)
+    operator = {"open_id": open_id} if mapping_identity else SimpleNamespace(open_id=open_id)
     return SimpleNamespace(
         event=SimpleNamespace(
             token=token,
-            context=SimpleNamespace(open_chat_id=chat_id),
-            operator=SimpleNamespace(open_id=open_id),
+            context=context,
+            operator=operator,
             action=SimpleNamespace(
                 tag="button",
                 value=action_value,
             ),
         ),
     )
+
+
+class _ToDictModel:
+    def __init__(self, value):
+        self._value = value
+
+    def to_dict(self):
+        return dict(self._value)
+
+
+class _ItemsMapping:
+    def __init__(self, value):
+        self._value = value
+
+    def items(self):
+        return self._value.items()
+
+
+class _SdkDeclaredModel:
+    _types = {
+        "ai_host_acceptance": bool,
+        "ticket_id": str,
+    }
+
+    def __init__(self):
+        self.ai_host_acceptance = True
+        self.ticket_id = "T-sdk"
 
 
 def _close_submitted_coro(coro, _loop):
@@ -423,8 +454,9 @@ class TestNonApprovalCardAction:
         adapter = _make_adapter()
 
         data = _make_card_action_data(
-            action_value={"custom_action": "something_else"},
+            action_value=_ItemsMapping({"custom_action": "something_else"}),
             token="tok_normal",
+            mapping_identity=True,
         )
 
         with (
@@ -440,6 +472,20 @@ class TestNonApprovalCardAction:
         mock_handle.assert_called_once()
         event = mock_handle.call_args[0][0]
         assert "/card button" in event.text
+        assert '"custom_action": "something_else"' in event.text
+
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_string_value(self, caplog):
+        adapter = _make_adapter()
+        secret = "not-json acceptance_token=do-not-log"
+        data = _make_card_action_data(action_value=secret, token="tok_malformed")
+
+        with patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle:
+            await adapter._handle_card_action_event(data)
+
+        mock_handle.assert_not_called()
+        assert "Dropping card action with malformed value" in caplog.text
+        assert secret not in caplog.text
 
 
 # ===========================================================================
@@ -466,6 +512,37 @@ def _patch_callback_card_types(monkeypatch):
 
 class TestCardActionCallbackResponse:
     """Test that _on_card_action_trigger returns updated card inline."""
+
+    def test_plain_button_submits_synthetic_command(self, _patch_callback_card_types):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        data = _make_card_action_data({"custom_action": "something_else"})
+        scheduled = object()
+
+        with (
+            patch.object(
+                adapter,
+                "_handle_card_action_event",
+                new=MagicMock(return_value=scheduled),
+            ) as mock_handle,
+            patch.object(adapter, "_submit_on_loop") as mock_submit,
+        ):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        mock_handle.assert_called_once_with(
+            data,
+            normalized_action_value={"custom_action": "something_else"},
+        )
+        mock_submit.assert_called_once_with(adapter._loop, scheduled)
+
+    def test_normalizes_sdk_declared_model_value(self):
+        assert feishu_module._normalize_card_action_value(_SdkDeclaredModel()) == {
+            "ai_host_acceptance": True,
+            "ticket_id": "T-sdk",
+        }
 
     def test_drops_action_when_loop_not_ready(self, _patch_callback_card_types):
         adapter = _make_adapter()
@@ -534,8 +611,9 @@ class TestCardActionCallbackResponse:
         adapter._loop.is_closed = MagicMock(return_value=False)
         adapter._sender_name_cache["ou_reporter"] = ("Reporter", 9999999999)
         data = _make_card_action_data(
-            {"ai_host_acceptance": True, "ticket_id": "T-test", "decision": "accepted_by_reporter", "evidence_version": 2, "acceptance_token": "opaque"},
+            json.dumps({"ai_host_acceptance": True, "ticket_id": "T-test", "decision": "accepted_by_reporter", "evidence_version": 2, "acceptance_token": "opaque"}),
             open_id="ou_reporter",
+            mapping_identity=True,
         )
         response_ctx = MagicMock()
         response_ctx.__enter__.return_value.read.return_value = b'{"event":{"id":"evt"}}'
@@ -547,8 +625,107 @@ class TestCardActionCallbackResponse:
         payload = json.loads(request.data.decode("utf-8"))
         assert payload["actor_id"] == "ou_reporter"
         assert payload["chat_id"] == "oc_12345"
+        assert payload["evidence_version"] == 2
         assert payload["acceptance_token"] == "opaque"
         assert response.card.data["header"]["title"]["content"] == "ai-host 工单人工验收"
+
+    def test_webhook_namespace_ai_host_action_still_routes(self, _patch_callback_card_types):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        data = adapter._namespace_from_mapping(
+            {
+                "event": {
+                    "operator": {"open_id": "ou_reporter"},
+                    "context": {"open_chat_id": "oc_12345"},
+                    "action": {
+                        "tag": "button",
+                        "value": {
+                            "ai_host_acceptance": True,
+                            "ticket_id": "T-webhook",
+                            "decision": "accepted_by_reporter",
+                            "evidence_version": 3,
+                            "acceptance_token": "webhook-token",
+                        },
+                    },
+                }
+            }
+        )
+        response_ctx = MagicMock()
+        response_ctx.__enter__.return_value.read.return_value = b'{}'
+        response_ctx.__exit__.return_value = False
+
+        with patch.object(feishu_module, "urlopen", return_value=response_ctx) as mock_urlopen:
+            response = adapter._on_card_action_trigger(data)
+
+        assert response.card is not None
+        request = mock_urlopen.call_args[0][0]
+        assert request.full_url.endswith("/api/tickets/T-webhook/human-acceptance")
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload["actor_id"] == "ou_reporter"
+        assert payload["chat_id"] == "oc_12345"
+        assert payload["evidence_version"] == 3
+        assert payload["acceptance_token"] == "webhook-token"
+
+    def test_rejects_malformed_string_without_routing(self, _patch_callback_card_types, caplog):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        secret = "{malformed acceptance_token=do-not-log"
+        data = _make_card_action_data(secret)
+
+        with patch.object(adapter, "_submit_on_loop") as mock_submit:
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        mock_submit.assert_not_called()
+        assert "Dropping card action with malformed value" in caplog.text
+        assert secret not in caplog.text
+
+    def test_json_string_approval_action_still_resolves(self, _patch_callback_card_types):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_bob"}
+        adapter._approval_state[9] = {
+            "session_key": "sess-9",
+            "message_id": "msg-9",
+            "chat_id": "oc_12345",
+        }
+        data = _make_card_action_data(
+            json.dumps({"hermes_action": "approve_once", "approval_id": 9}),
+            open_id="ou_bob",
+            mapping_identity=True,
+        )
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response.card is not None
+        assert response.card.data["header"]["template"] == "green"
+
+    def test_to_dict_update_prompt_action_still_resolves(self, _patch_callback_card_types):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_bob"}
+        adapter._update_prompt_state[9] = {
+            "session_key": "sess-up-9",
+            "message_id": "msg-up-9",
+            "chat_id": "oc_12345",
+        }
+        data = _make_card_action_data(
+            _ToDictModel({"hermes_update_prompt_action": "y", "update_prompt_id": 9}),
+            open_id="ou_bob",
+            mapping_identity=True,
+        )
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response.card is not None
+        assert response.card.data["header"]["template"] == "green"
 
     def test_ignores_missing_approval_id(self, _patch_callback_card_types):
         adapter = _make_adapter()

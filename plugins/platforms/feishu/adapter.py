@@ -61,6 +61,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -222,6 +223,87 @@ _APPROVAL_CHOICE_MAP: Dict[str, str] = {
     "approve_always": "always",
     "deny": "deny",
 }
+
+
+def _coerce_sdk_mapping(value: Any, *, _depth: int = 0) -> Optional[Dict[str, Any]]:
+    """Return a plain dict for SDK/mapping objects without guessing from iterables."""
+    if _depth > 2:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, Mapping):
+        try:
+            return dict(value)
+        except Exception:
+            return None
+    if isinstance(value, SimpleNamespace):
+        return dict(vars(value))
+
+    try:
+        sdk_fields = getattr(value, "_types", None)
+    except Exception:
+        return None
+    if isinstance(sdk_fields, Mapping):
+        converted: Dict[str, Any] = {}
+        try:
+            for field_name in sdk_fields:
+                if isinstance(field_name, str):
+                    converted[field_name] = getattr(value, field_name, None)
+        except Exception:
+            return None
+        return converted
+
+    try:
+        to_dict = getattr(value, "to_dict", None)
+    except Exception:
+        return None
+    if callable(to_dict):
+        try:
+            converted = to_dict()
+        except Exception:
+            return None
+        if converted is value:
+            return None
+        return _coerce_sdk_mapping(converted, _depth=_depth + 1)
+
+    try:
+        items = getattr(value, "items", None)
+    except Exception:
+        return None
+    if callable(items):
+        try:
+            return dict(items())
+        except Exception:
+            return None
+    return None
+
+
+def _sdk_field(value: Any, field_name: str, default: Any = None) -> Any:
+    """Read a field from SDK models, dicts, and mapping-like callback objects."""
+    if value is None:
+        return default
+    mapping = _coerce_sdk_mapping(value)
+    if mapping is not None and field_name in mapping:
+        return mapping[field_name]
+    try:
+        result = getattr(value, field_name)
+    except Exception:
+        return default
+    return default if result is None else result
+
+
+def _normalize_card_action_value(value: Any) -> Optional[Dict[str, Any]]:
+    """Normalize supported Feishu action values, rejecting malformed/unsafe shapes."""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+    return _coerce_sdk_mapping(value)
+
+
 _APPROVAL_LABEL_MAP: Dict[str, str] = {
     "once": "Approved once",
     "session": "Approved for session",
@@ -2645,18 +2727,23 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.warning("[Feishu] Dropping card action before adapter loop is ready")
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
-        event = getattr(data, "event", None)
-        action = getattr(event, "action", None)
-        action_value = getattr(action, "value", {}) or {}
-        hermes_action = action_value.get("hermes_action") if isinstance(action_value, dict) else None
-        update_prompt_action = (
-            action_value.get("hermes_update_prompt_action")
-            if isinstance(action_value, dict) else None
-        )
+        event = _sdk_field(data, "event")
+        action = _sdk_field(event, "action")
+        raw_action_value = _sdk_field(action, "value")
+        action_value = _normalize_card_action_value(raw_action_value)
+        if action_value is None:
+            logger.warning(
+                "[Feishu] Dropping card action with malformed value (type=%s)",
+                type(raw_action_value).__name__,
+            )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        hermes_action = action_value.get("hermes_action")
+        update_prompt_action = action_value.get("hermes_update_prompt_action")
 
         if hermes_action:
             return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
-        if isinstance(action_value, dict) and action_value.get("ai_host_acceptance"):
+        if action_value.get("ai_host_acceptance"):
             return self._handle_ai_host_acceptance_card_action(event=event, action_value=action_value)
         if update_prompt_action:
             return self._handle_update_prompt_card_action(
@@ -2665,7 +2752,10 @@ class FeishuAdapter(BasePlatformAdapter):
                 loop=loop,
             )
 
-        self._submit_on_loop(loop, self._handle_card_action_event(data))
+        self._submit_on_loop(
+            loop,
+            self._handle_card_action_event(data, normalized_action_value=action_value),
+        )
         if P2CardActionTriggerResponse is None:
             return None
         return P2CardActionTriggerResponse()
@@ -2677,10 +2767,10 @@ class FeishuAdapter(BasePlatformAdapter):
         source chat, evidence version, card-bound random token, and idempotency.
         This callback only forwards the signed-in Feishu operator identity.
         """
-        operator = getattr(event, "operator", None)
-        context = getattr(event, "context", None)
-        open_id = str(getattr(operator, "open_id", "") or "")
-        chat_id = str(getattr(context, "open_chat_id", "") or "")
+        operator = _sdk_field(event, "operator")
+        context = _sdk_field(event, "context")
+        open_id = str(_sdk_field(operator, "open_id", "") or "")
+        chat_id = str(_sdk_field(context, "open_chat_id", "") or "")
         ticket_id = str(action_value.get("ticket_id", "") or "")
         decision = str(action_value.get("decision", "") or "")
         if not open_id or not chat_id or not ticket_id or not decision:
@@ -2761,13 +2851,15 @@ class FeishuAdapter(BasePlatformAdapter):
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         choice = _APPROVAL_CHOICE_MAP.get(action_value.get("hermes_action"), "deny")
 
-        operator = getattr(event, "operator", None)
-        open_id = str(getattr(operator, "open_id", "") or "")
+        operator = _sdk_field(event, "operator")
+        open_id = str(_sdk_field(operator, "open_id", "") or "")
         if not self._is_interactive_operator_authorized(open_id):
             logger.warning("[Feishu] Unauthorized approval click by %s", open_id or "<unknown>")
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
-        callback_chat_id = str(getattr(getattr(event, "context", None), "open_chat_id", "") or "")
+        callback_chat_id = str(
+            _sdk_field(_sdk_field(event, "context"), "open_chat_id", "") or ""
+        )
         expected_chat_id = str(state.get("chat_id", "") or "")
         if callback_chat_id and expected_chat_id and callback_chat_id != expected_chat_id:
             logger.warning(
@@ -2780,8 +2872,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
         user_name = self._get_cached_sender_name(open_id) or open_id
 
-        chat_context = getattr(event, "context", None)
-        chat_id = str(getattr(chat_context, "open_chat_id", "") or "")
+        chat_context = _sdk_field(event, "context")
+        chat_id = str(_sdk_field(chat_context, "open_chat_id", "") or "")
         if not self._submit_on_loop(
             loop,
             self._resolve_approval(
@@ -2820,13 +2912,15 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Card action has invalid update prompt answer=%r", answer)
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
-        operator = getattr(event, "operator", None)
-        open_id = str(getattr(operator, "open_id", "") or "")
+        operator = _sdk_field(event, "operator")
+        open_id = str(_sdk_field(operator, "open_id", "") or "")
         if not self._is_interactive_operator_authorized(open_id):
             logger.warning("[Feishu] Unauthorized update prompt click by %s", open_id or "<unknown>")
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
-        callback_chat_id = str(getattr(getattr(event, "context", None), "open_chat_id", "") or "")
+        callback_chat_id = str(
+            _sdk_field(_sdk_field(event, "context"), "open_chat_id", "") or ""
+        )
         expected_chat_id = str(state.get("chat_id", "") or "")
         if callback_chat_id and expected_chat_id and callback_chat_id != expected_chat_id:
             logger.warning(
@@ -3012,25 +3106,39 @@ class FeishuAdapter(BasePlatformAdapter):
         self._card_action_tokens[token] = now
         return False
 
-    async def _handle_card_action_event(self, data: Any) -> None:
+    async def _handle_card_action_event(
+        self,
+        data: Any,
+        *,
+        normalized_action_value: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Route Feishu interactive card button clicks as synthetic COMMAND events."""
-        event = getattr(data, "event", None)
-        token = str(getattr(event, "token", "") or "")
+        event = _sdk_field(data, "event")
+        token = str(_sdk_field(event, "token", "") or "")
         if token and self._is_card_action_duplicate(token):
             logger.debug("[Feishu] Dropping duplicate card action token: %s", token)
             return
 
-        context = getattr(event, "context", None)
-        chat_id = str(getattr(context, "open_chat_id", "") or "")
-        operator = getattr(event, "operator", None)
-        open_id = str(getattr(operator, "open_id", "") or "")
+        context = _sdk_field(event, "context")
+        chat_id = str(_sdk_field(context, "open_chat_id", "") or "")
+        operator = _sdk_field(event, "operator")
+        open_id = str(_sdk_field(operator, "open_id", "") or "")
         if not chat_id or not open_id:
             logger.debug("[Feishu] Card action missing chat_id or operator open_id, dropping")
             return
 
-        action = getattr(event, "action", None)
-        action_tag = str(getattr(action, "tag", "") or "button")
-        action_value = getattr(action, "value", {}) or {}
+        action = _sdk_field(event, "action")
+        action_tag = str(_sdk_field(action, "tag", "") or "button")
+        action_value = normalized_action_value
+        if action_value is None:
+            raw_action_value = _sdk_field(action, "value")
+            action_value = _normalize_card_action_value(raw_action_value)
+            if action_value is None:
+                logger.warning(
+                    "[Feishu] Dropping card action with malformed value (type=%s)",
+                    type(raw_action_value).__name__,
+                )
+                return
 
         synthetic_text = f"/card {action_tag}"
         if action_value:
