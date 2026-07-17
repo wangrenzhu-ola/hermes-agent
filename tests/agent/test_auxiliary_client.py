@@ -285,6 +285,38 @@ class TestBuildCallKwargsMaxTokens:
     the one exception — max_tokens is a mandatory field there.
     """
 
+    def test_gpt56_strips_openrouter_enabled_from_reasoning_extra_body(self):
+        extra_body = {"reasoning": {"enabled": True, "effort": "minimal"}}
+        kwargs = _build_call_kwargs(
+            provider="custom",
+            model="gpt-5.6-luna",
+            messages=[{"role": "user", "content": "name this session"}],
+            extra_body=extra_body,
+        )
+
+        assert kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+        assert extra_body == {"reasoning": {"enabled": True, "effort": "minimal"}}
+
+    def test_gpt56_disabled_reasoning_is_omitted_from_extra_body(self):
+        kwargs = _build_call_kwargs(
+            provider="custom",
+            model="gpt-5.6-luna",
+            messages=[{"role": "user", "content": "name this session"}],
+            extra_body={"reasoning": {"enabled": False, "effort": "minimal"}},
+        )
+
+        assert "extra_body" not in kwargs
+
+    def test_gpt56_clamps_minimal_even_without_enabled_flag(self):
+        kwargs = _build_call_kwargs(
+            provider="custom",
+            model="gpt-5.6-luna",
+            messages=[{"role": "user", "content": "name this session"}],
+            extra_body={"reasoning": {"effort": "minimal"}},
+        )
+
+        assert kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+
     @pytest.mark.parametrize(
         "provider,model,base_url",
         [

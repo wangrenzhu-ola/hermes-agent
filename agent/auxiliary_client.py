@@ -343,9 +343,9 @@ def _is_arcee_trinity_thinking(model: Optional[str]) -> bool:
 
 
 # Context window enforced by ChatGPT's Codex OAuth backend for the
-# gpt-5.4 / gpt-5.5 / gpt-5.6 families. The raw OpenAI API and OpenRouter
-# expose 1.05M for the same slugs, but the Codex backend hard-caps at 272K
-# (verified live for 5.4/5.5: a ~330K-token request to
+# gpt-5.4 / gpt-5.5 / gpt-5.6 families. GPT-5.6 is currently capped at
+# 272K across OpenAI surfaces; this route-specific override also applies to
+# 5.4/5.5 (verified live: a ~330K-token request to
 # chatgpt.com/backend-api/codex/responses is rejected with
 # ``context_length_exceeded`` while ~250K succeeds; gpt-5.6 shares the same
 # 272K Codex cap — see _CODEX_OAUTH_CONTEXT_FALLBACK in model_metadata.py).
@@ -6707,12 +6707,8 @@ def _build_call_kwargs(
         kwargs["tools"] = _deduped
 
     # Build provider-aware reasoning kwargs through the same profile hooks used
-    # by the standard chat-completions transport. Some providers require
-    # top-level controls (Kimi/custom ``reasoning_effort``), others use nested
-    # body fields (Gemini ``thinking_config``), and OpenRouter/Nous use
-    # ``extra_body.reasoning``. Profiles are the source of truth for those wire
-    # shapes. Providers without a reasoning-aware profile retain the generic
-    # ``extra_body.reasoning`` fallback used by Codex-compatible adapters.
+    # by the standard chat-completions transport. Profiles are the source of
+    # truth for provider-specific wire shapes.
     effective_base = base_url or (
         _current_custom_base_url() if provider == "custom" else ""
     )
@@ -6769,6 +6765,25 @@ def _build_call_kwargs(
         else:
             effort = reasoning_config.get("effort") or "medium"
             merged_extra["reasoning"] = {"enabled": True, "effort": effort}
+
+    # GPT-5.6 OpenAI-compatible endpoints accept ``reasoning.effort`` but not
+    # the OpenRouter-only ``enabled`` key. Normalize the final merged payload so
+    # profile-projected and fallback reasoning controls follow the same wire
+    # contract without mutating the caller's ``extra_body``.
+    if "gpt-5.6" in (model or "").lower():
+        raw_reasoning = merged_extra.get("reasoning")
+        if isinstance(raw_reasoning, dict):
+            if raw_reasoning.get("enabled") is False:
+                merged_extra.pop("reasoning", None)
+            else:
+                normalized_reasoning = dict(raw_reasoning)
+                normalized_reasoning.pop("enabled", None)
+                if normalized_reasoning.get("effort") == "minimal":
+                    normalized_reasoning["effort"] = "low"
+                if normalized_reasoning:
+                    merged_extra["reasoning"] = normalized_reasoning
+                else:
+                    merged_extra.pop("reasoning", None)
     if provider == "nous" and "tags" not in merged_extra:
         merged_extra["tags"] = _nous_portal_tags()
     if merged_extra:

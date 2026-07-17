@@ -229,12 +229,13 @@ DEFAULT_CONTEXT_LENGTHS = {
     # ChatGPT Codex OAuth caps it at 272K; both paths resolve via their own
     # provider-aware branches (_resolve_codex_oauth_context_length + models.dev).
     # This hardcoded value is only reached when every probe misses.
-    # GPT-5.6 series (Sol/Terra/Luna, GA 2026-07-09) — 1.05M on the direct
-    # OpenAI API (same as gpt-5.5). Codex OAuth caps these at 272K.
+    # GPT-5.6 series (Sol/Terra/Luna, GA 2026-07-09) — currently capped at
+    # 272K across OpenAI surfaces. Keep this fallback aligned with the live
+    # service catalog rather than the earlier 1.05M launch metadata.
     # (Lookups length-sort keys at match time, so dict order is cosmetic.)
-    "gpt-5.6-luna": 1050000,
-    "gpt-5.6-terra": 1050000,
-    "gpt-5.6-sol": 1050000,
+    "gpt-5.6-luna": 272000,
+    "gpt-5.6-terra": 272000,
+    "gpt-5.6-sol": 272000,
     "gpt-5.5": 1050000,
     "gpt-5.4-nano": 400000,           # 400k (not 1.05M like full 5.4)
     "gpt-5.4-mini": 400000,           # 400k (not 1.05M like full 5.4)
@@ -2103,6 +2104,13 @@ def get_model_context_length(
     # 0. Explicit config override — user knows best
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
+
+    # GPT-5.6 was rolled back from its launch-time 1.05M metadata to a 272K
+    # runtime cap across the currently supported OpenAI surfaces. Resolve this
+    # before persistent/live registries so stale 1.05M entries cannot silently
+    # overstate the usable window. Explicit user config above remains authoritative.
+    if "gpt-5.6" in (model or "").lower():
+        return 272_000
 
     # 0a. MoA virtual provider — ``model`` is a preset name, not a real model,
     # and ``base_url`` is the local virtual endpoint, so every probe below would

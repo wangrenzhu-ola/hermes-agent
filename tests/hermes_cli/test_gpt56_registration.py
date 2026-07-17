@@ -18,6 +18,7 @@ from agent.usage_pricing import (
     _lookup_official_docs_pricing,
     resolve_billing_route,
 )
+from agent.model_metadata import get_model_context_length
 from hermes_cli.model_switch import _model_sort_key
 
 
@@ -86,7 +87,23 @@ class TestGpt56PricingRoute:
 class TestGpt56CodexCompaction:
     """Codex OAuth caps the whole gpt-5.6 family at 272K, same as 5.4/5.5, so
     the compaction auto-raise (0.85) must fire for every 5.6 variant on the
-    openai-codex route and NOT on the direct-API/OpenRouter routes."""
+    openai-codex route. Context metadata itself is capped at 272K on every
+    currently supported route."""
+
+    def test_context_is_272k_across_routes(self):
+        for provider, model in (
+            ("openai-codex", "gpt-5.6-sol"),
+            ("openai-api", "gpt-5.6-terra"),
+            ("openrouter", "openai/gpt-5.6-luna"),
+        ):
+            assert get_model_context_length(model, provider=provider) == 272_000
+
+    def test_explicit_context_override_remains_authoritative(self):
+        assert get_model_context_length(
+            "gpt-5.6-sol",
+            provider="openai-api",
+            config_context_length=200_000,
+        ) == 200_000
 
     def test_autoraise_applies_to_all_56_on_codex(self):
         from agent.auxiliary_client import _compression_threshold_for_model
@@ -107,8 +124,8 @@ class TestGpt56CodexCompaction:
     def test_no_autoraise_on_direct_api_route(self):
         from agent.auxiliary_client import _compression_threshold_for_model
 
-        # Direct OpenAI API / OpenRouter expose the full 1.05M window, so the
-        # 272K-cap override must NOT apply there.
+        # The compaction threshold auto-raise is still Codex-route-specific;
+        # direct routes use their normal threshold even though metadata is 272K.
         assert (
             _compression_threshold_for_model("gpt-5.6-sol", provider="openai")
             is None
